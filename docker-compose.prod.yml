@@ -1,0 +1,11 @@
+# Run with:
+# docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+services:
+  mongo:
+    environment:
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD before production deployment}
+
+  server:
+    environment:
+      MONGO_URI: mongodb://admin:${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD}@mongo:27017/chatapp?authSource=admin
+
