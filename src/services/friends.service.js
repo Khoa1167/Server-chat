@@ -2,6 +2,8 @@ const mongoose = require('mongoose');
 const Friendship = require('../models/Friendship');
 const User = require('../models/User');
 const Room = require('../models/Room');
+const Block = require('../models/Block');
+const { isBlocked } = require('./blocks.service');
 const userFields = require('../utils/publicUserFields');
 const { decryptPII } = require('../utils/crypto');
 const AppError = require('../utils/AppError');
@@ -68,6 +70,9 @@ async function sendFriendRequest(senderId, receiverId, io) {
   if (receiverId === senderId.toString()) {
     throw new AppError('Không thể kết bạn với chính mình', 400);
   }
+  if (await isBlocked(senderId, receiverId)) {
+    throw new AppError('Không thể gửi lời mời kết bạn', 403);
+  }
 
   // Kiểm tra đã có quan hệ chưa
   const exists = await Friendship.findOne({
@@ -89,6 +94,7 @@ async function sendFriendRequest(senderId, receiverId, io) {
       await exists.populate('sender', userFields.BASIC);
       await exists.populate('receiver', userFields.BASIC);
       await createNotification(io, { user: receiverId, type: 'friend_request', fromUser: senderId });
+      await notifyFriendRequest(io, receiverId, exists);
       return { friendship: exists, isNew: false };
     }
   }
@@ -108,8 +114,17 @@ async function sendFriendRequest(senderId, receiverId, io) {
   await friendship.populate('sender', userFields.BASIC);
   await friendship.populate('receiver', userFields.BASIC);
   await createNotification(io, { user: receiverId, type: 'friend_request', fromUser: senderId });
+  await notifyFriendRequest(io, receiverId, friendship);
 
   return { friendship, isNew: true };
+}
+
+async function notifyFriendRequest(io, receiverId, friendship) {
+  if (!io) return;
+  const allSockets = await io.fetchSockets();
+  allSockets
+    .filter(s => s.data.user?._id.toString() === receiverId.toString())
+    .forEach(s => s.emit('friend:request_received', friendship));
 }
 
 // Báo cho cả 2 phía quan hệ bạn bè (không chỉ đối phương) để mọi nơi đang mở tự đồng bộ.
@@ -124,6 +139,7 @@ async function notifyFriendshipParties(io, senderId, receiverId, event, payload)
 
 // Lấy phòng DM giữa 2 người, tự tạo nếu chưa có — dùng chung cho acceptFriendRequest và getDmRoom.
 async function getOrCreateDmRoom(userId1, userId2, createdBy) {
+  if (await isBlocked(userId1, userId2)) throw new AppError('Không thể mở đoạn chat này', 403);
   const existing = await Room.findOne({
     isDM: true,
     members: { $all: [userId1, userId2] },
@@ -148,6 +164,9 @@ async function acceptFriendRequest(friendshipId, currentUserId, io) {
   });
 
   if (!friendship) throw new AppError('Không tìm thấy lời mời', 404);
+  if (await isBlocked(friendship.sender, friendship.receiver)) {
+    throw new AppError('Không thể chấp nhận lời mời kết bạn', 403);
+  }
 
   friendship.status = 'accepted';
   await friendship.save();
@@ -237,6 +256,7 @@ async function cancelRequest(currentUserId, targetUserId, io) {
 }
 
 async function getDmRoom(currentUserId, targetUserId, io) {
+  if (await isBlocked(currentUserId, targetUserId)) throw new AppError('Không thể mở đoạn chat này', 403);
   const friendship = await Friendship.findOne({
     $or: [
       { sender: currentUserId, receiver: targetUserId },
@@ -273,10 +293,17 @@ async function getProfile(currentId, targetId) {
   let friendshipStatus = 'none';
   let friendshipId = null;
   let customAlias = '';
+  const block = currentId.toString() !== targetId.toString()
+    ? await Block.findOne({ $or: [
+      { blocker: currentId, blocked: targetId },
+      { blocker: targetId, blocked: currentId },
+    ] }).select('blocker').lean()
+    : null;
+  const blockedByMe = block?.blocker.toString() === currentId.toString();
 
   if (currentId.toString() === targetId.toString()) {
     friendshipStatus = 'self';
-  } else {
+  } else if (!block) {
     const friendship = await Friendship.findOne({
       $or: [
         { sender: currentId, receiver: targetId },
@@ -352,11 +379,43 @@ async function getProfile(currentId, targetId) {
       phone: visible(ps.phone) ? decryptPII(targetUser.phone) : null,
     },
     friendshipStatus,
+    blockedByMe,
     friendshipId,
     customAlias,
     mutualRooms,
     mutualFriendsCount: mutualFriendIds.length,
     mutualFriends,
+  };
+}
+
+async function blockUser(currentId, targetId, io) {
+  if (currentId.toString() === targetId.toString()) throw new AppError('Không thể chặn chính mình', 400);
+  if (!await User.exists({ _id: targetId })) throw new AppError('Không tìm thấy người dùng', 404);
+
+  await Block.updateOne({ blocker: currentId, blocked: targetId },
+    { $setOnInsert: { blocker: currentId, blocked: targetId } }, { upsert: true });
+  const friendship = await Friendship.findOneAndDelete({
+    $or: [
+      { sender: currentId, receiver: targetId },
+      { sender: targetId, receiver: currentId },
+    ],
+  });
+  if (friendship) {
+    const event = friendship.status === 'accepted' ? 'friend:unfriended' : 'friend:request_cancelled';
+    await notifyFriendshipParties(io, currentId, targetId, event, { friendshipId: friendship._id });
+  }
+}
+
+async function unblockUser(currentId, targetId) {
+  await Block.deleteOne({ blocker: currentId, blocked: targetId });
+}
+
+async function listBlocked(currentId, page) {
+  const blocks = await Block.find({ blocker: currentId }).sort({ createdAt: -1, _id: -1 })
+    .skip((page - 1) * 50).limit(51).populate('blocked', 'nickname avatar').lean();
+  return {
+    users: blocks.slice(0, 50).filter(entry => entry.blocked).map(entry => entry.blocked),
+    hasMore: blocks.length > 50,
   };
 }
 
@@ -397,4 +456,7 @@ module.exports = {
   getDmRoom,
   getProfile,
   setAlias,
+  blockUser,
+  unblockUser,
+  listBlocked,
 };

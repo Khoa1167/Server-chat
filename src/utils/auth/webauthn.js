@@ -13,10 +13,21 @@ if (production && (!process.env.WEBAUTHN_RP_ID || !process.env.WEBAUTHN_ORIGIN))
 }
 const rpName = process.env.WEBAUTHN_RP_NAME || 'Chat App';
 
+const toWebAuthnUserID = id => {
+  const rawId = id?.id;
+  if (rawId instanceof Uint8Array) return new Uint8Array(rawId);
+
+  const value = id?.toString();
+  if (!/^[0-9a-f]{24}$/i.test(value || '')) {
+    throw new TypeError('WebAuthn user ID phải là MongoDB ObjectId hợp lệ');
+  }
+  return new Uint8Array(Buffer.from(value, 'hex'));
+};
+
 const generateRegistrationOptions = (user, credentials) => registrationOptions({
   rpName, rpID,
   userName: user.username,
-  userID: user._id.toString(),
+  userID: toWebAuthnUserID(user._id),
   attestationType: 'none',
   excludeCredentials: credentials.map(c => ({ id: c.credentialId, transports: c.transports })),
   authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },

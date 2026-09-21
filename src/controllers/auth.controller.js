@@ -2,6 +2,38 @@ const authService = require('../services/auth.service');
 const AppError = require('../utils/AppError');
 const handleError = require('../utils/handleError');
 const { setAuthCookie, clearAuthCookie } = require('../utils/auth/authCookie');
+const deviceLinkService = require('../services/deviceLink.service');
+const { getCallIceServers } = require('../services/turnCredentials.service');
+const { checkRateWindow } = require('../utils/rateLimiter');
+
+const NS_DEVICE_LINK = 'device-link';
+const NS_DEVICE_LINK_CODE = 'device-link-code';
+const NS_DEVICE_LINK_PART = 'device-link-part';
+const allowDeviceLink = async (req, res) => {
+  const { limited } = await checkRateWindow(NS_DEVICE_LINK, req.user._id.toString(), { maxCount: 20, windowMs: 10 * 60 * 1000 });
+  if (!limited) return true;
+  res.status(429).json({ message: 'Thao tác liên kết thiết bị quá nhanh, vui lòng thử lại sau' });
+  return false;
+};
+const allowDeviceLinkCode = async (req, res) => {
+  const [userLimit, ipLimit] = await Promise.all([
+    checkRateWindow(NS_DEVICE_LINK_CODE, req.user._id.toString(), { maxCount: 5, windowMs: 10 * 60 * 1000 }),
+    checkRateWindow(`${NS_DEVICE_LINK_CODE}:ip`, req.ip, { maxCount: 15, windowMs: 10 * 60 * 1000 }),
+  ]);
+  if (!userLimit.limited && !ipLimit.limited) return true;
+  res.status(429).json({ message: 'Thao tác liên kết thiết bị quá nhanh, vui lòng thử lại sau' });
+  return false;
+};
+const allowDeviceLinkPart = async (req, res) => {
+  const { limited } = await checkRateWindow(
+    NS_DEVICE_LINK_PART,
+    `${req.user._id}:${req.params.id}`,
+    { maxCount: 300, windowMs: 10 * 60 * 1000 },
+  );
+  if (!limited) return true;
+  res.status(429).json({ message: 'Cấp URL archive quá nhanh, vui lòng thử lại sau' });
+  return false;
+};
 
 // Dịch AppError thành đúng status/message/field, khác handleError dùng chung ở chỗ fallback 500
 // là message tĩnh do route tự chọn (giữ đúng hành vi gốc của từng route) thay vì sendServerError.
@@ -78,6 +110,9 @@ exports.verifyPasskeyLogin = async (req, res) => {
 exports.getMfaStatus = async (req, res) => {
   try { res.json(await authService.getMfaStatus(req.user._id)); } catch (err) { handleError(res, err); }
 };
+exports.getCallIceServers = (req, res) => {
+  res.json({ iceServers: getCallIceServers(req.user._id.toString()) });
+};
 exports.listPasskeys = async (req, res) => {
   try { res.json(await authService.listPasskeys(req.user._id)); } catch (err) { handleError(res, err); }
 };
@@ -99,14 +134,36 @@ exports.renamePasskey = async (req, res) => {
 exports.removePasskey = async (req, res) => {
   try { res.json(await authService.removePasskey(req.user, req.params.credentialId, req.body)); } catch (err) { handleError(res, err); }
 };
-exports.saveHistoryBackup = async (req, res) => {
-  try { res.json(await authService.saveHistoryBackup(req.user, req.body)); } catch (err) { handleError(res, err); }
+exports.createDeviceLinkTransfer = async (req, res) => {
+  try { if (await allowDeviceLink(req, res)) res.status(201).json(await deviceLinkService.createTransfer(req.user, req.deviceId, req.body.publicKey)); } catch (err) { handleError(res, err); }
 };
-exports.getHistoryBackup = async (req, res) => {
-  try { res.json(await authService.getHistoryBackup(req.user._id)); } catch (err) { handleError(res, err); }
+exports.approveDeviceLinkTransfer = async (req, res) => {
+  try { if (await allowDeviceLink(req, res)) res.json(await deviceLinkService.approveTransfer(req.params.id, req.user, req.deviceId, req.app.get('socketio'))); } catch (err) { handleError(res, err); }
 };
-exports.deleteHistoryBackup = async (req, res) => {
-  try { res.json(await authService.deleteHistoryBackup(req.user, req.body)); } catch (err) { handleError(res, err); }
+exports.approveDeviceLinkByCode = async (req, res) => {
+  try { if (await allowDeviceLinkCode(req, res)) res.json(await deviceLinkService.approveTransferByCode(req.body?.code, req.user, req.deviceId, req.app.get('socketio'))); } catch (err) { handleError(res, err); }
+};
+exports.reserveDeviceLinkArchive = async (req, res) => {
+  try { if (await allowDeviceLink(req, res)) res.json(await deviceLinkService.reserveArchiveUpload(req.params.id, req.user, req.deviceId, req.body)); } catch (err) { handleError(res, err); }
+};
+exports.getDeviceLinkArchivePartUploadUrl = async (req, res) => {
+  try {
+    if (await allowDeviceLinkPart(req, res)) {
+      res.json(await deviceLinkService.getArchivePartUploadUrl(req.params.id, req.user, req.deviceId, {
+        ...req.body,
+        partNumber: Number(req.params.partNumber),
+      }));
+    }
+  } catch (err) { handleError(res, err); }
+};
+exports.completeDeviceLinkArchive = async (req, res) => {
+  try { if (await allowDeviceLink(req, res)) { await deviceLinkService.completeArchiveUpload(req.params.id, req.user, req.deviceId, req.app.get('socketio')); res.json({ message: 'Đã gửi archive mã hóa' }); } } catch (err) { handleError(res, err); }
+};
+exports.getDeviceLinkArchive = async (req, res) => {
+  try { if (await allowDeviceLink(req, res)) res.json(await deviceLinkService.getArchiveDownload(req.params.id, req.user, req.deviceId)); } catch (err) { handleError(res, err); }
+};
+exports.acknowledgeDeviceLinkArchive = async (req, res) => {
+  try { if (await allowDeviceLink(req, res)) { await deviceLinkService.acknowledgeArchive(req.params.id, req.user, req.deviceId); res.json({ message: 'Đã nhập archive' }); } } catch (err) { handleError(res, err); }
 };
 
 exports.beginTotpSetup = async (req, res) => {

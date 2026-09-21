@@ -11,6 +11,10 @@ router.get('/requests', protect, friendsController.listPendingRequests);
 // GET /api/friends/search?q=keyword — tìm kiếm user
 router.get('/search', protect, friendsController.searchUsers);
 
+router.get('/blocked', protect, friendsController.listBlocked);
+router.post('/block/:userId', protect, friendsController.blockUser);
+router.delete('/block/:userId', protect, friendsController.unblockUser);
+
 // POST /api/friends/request/:userId — gửi lời mời kết bạn
 router.post('/request/:userId', protect, friendsController.sendFriendRequest);
 

@@ -1,11 +1,13 @@
 const roomsService = require('../services/rooms.service');
-const uploadService = require('../services/upload.service');
+const usersService = require('../services/users.service');
+const attachmentsService = require('../services/attachments.service');
 const handleError = require('../utils/handleError');
 const { checkRateWindow } = require('../utils/rateLimiter');
 
 const NS_ROOM_INVITE = 'room-invite';
 const NS_ROOM_UPLOAD = 'room-upload';
 const NS_ROOM_CREATE = 'room-create';
+const NS_ROOM_DEVICE_KEYS = 'room-device-keys';
 
 exports.listMyRooms = async (req, res) => {
   try {
@@ -42,6 +44,16 @@ exports.getRoomMessages = async (req, res) => {
     const { before, limit } = req.query;
     const messages = await roomsService.getRoomMessages(req.params.id, req.user._id, { before, limit: limit || 30 });
     res.json(messages);
+  } catch (err) {
+    handleError(res, err);
+  }
+};
+
+exports.getRoomDevices = async (req, res) => {
+  try {
+    const { limited } = await checkRateWindow(NS_ROOM_DEVICE_KEYS, req.user._id.toString(), { maxCount: 60, windowMs: 60000 });
+    if (limited) return res.status(429).json({ message: 'Quá nhiều yêu cầu truy vấn thiết bị' });
+    res.json(await usersService.getRoomDevices(req.user._id.toString(), req.params.id));
   } catch (err) {
     handleError(res, err);
   }
@@ -315,40 +327,29 @@ exports.revokePermission = async (req, res) => {
   }
 };
 
-exports.uploadAudio = async (req, res) => {
+exports.createAttachmentUpload = async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ message: 'Không tìm thấy tệp âm thanh' });
     const { limited } = await checkRateWindow(NS_ROOM_UPLOAD, req.user._id.toString(), { maxCount: 30, windowMs: 5 * 60 * 1000 });
     if (limited) return res.status(429).json({ message: 'Thao tác quá nhanh, thử lại sau' });
-
-    const result = await uploadService.uploadToCloudinary(req.file.buffer, 'chat-app/audios');
-    res.json({ url: result.secure_url });
+    const { type, expectedSize } = req.body;
+    res.status(201).json(await attachmentsService.createUpload(req.params.id, req.user._id, type, expectedSize));
   } catch (err) {
     handleError(res, err);
   }
 };
 
-exports.uploadImage = async (req, res) => {
+exports.completeAttachmentUpload = async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ message: 'Không tìm thấy tệp hình ảnh' });
-    const { limited } = await checkRateWindow(NS_ROOM_UPLOAD, req.user._id.toString(), { maxCount: 30, windowMs: 5 * 60 * 1000 });
-    if (limited) return res.status(429).json({ message: 'Thao tác quá nhanh, thử lại sau' });
-
-    const result = await uploadService.uploadToCloudinary(req.file.buffer, 'chat-app/images');
-    res.json({ url: result.secure_url });
+    res.json(await attachmentsService.completeUpload(req.params.id, req.user._id, req.params.attachmentId));
   } catch (err) {
     handleError(res, err);
   }
 };
 
-exports.uploadFile = async (req, res) => {
+exports.getAttachmentDownloadUrl = async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ message: 'Không tìm thấy tệp tin' });
-    const { limited } = await checkRateWindow(NS_ROOM_UPLOAD, req.user._id.toString(), { maxCount: 30, windowMs: 5 * 60 * 1000 });
-    if (limited) return res.status(429).json({ message: 'Thao tác quá nhanh, thử lại sau' });
-
-    const result = await uploadService.uploadToCloudinary(req.file.buffer, 'chat-app/files');
-    res.json({ url: result.secure_url });
+    const url = await attachmentsService.getDownloadUrl(req.params.id, req.user._id, req.params.attachmentId);
+    res.json({ url });
   } catch (err) {
     handleError(res, err);
   }

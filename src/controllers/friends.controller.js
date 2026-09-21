@@ -4,6 +4,7 @@ const handleError = require('../utils/handleError');
 const { checkRateWindow } = require('../utils/rateLimiter');
 
 const NS_FRIEND_REQUEST = 'friend-request';
+const NS_BLOCK = 'user-block';
 
 exports.listFriends = async (req, res) => {
   try {
@@ -123,6 +124,42 @@ exports.setAlias = async (req, res) => {
   try {
     const customAlias = await friendsService.setAlias(req.user._id, req.params.userId, req.body.alias);
     res.json({ message: 'Cập nhật biệt danh thành công', customAlias });
+  } catch (err) {
+    handleError(res, err);
+  }
+};
+
+exports.listBlocked = async (req, res) => {
+  try {
+    const page = Number(req.query.page || 1);
+    if (!Number.isSafeInteger(page) || page < 1 || page > 1000) return res.status(400).json({ message: 'Trang không hợp lệ' });
+    res.json(await friendsService.listBlocked(req.user._id, page));
+  } catch (err) {
+    handleError(res, err);
+  }
+};
+
+exports.blockUser = async (req, res) => {
+  try {
+    const targetId = req.params.userId;
+    if (!mongoose.Types.ObjectId.isValid(targetId)) return res.status(400).json({ message: 'ID người dùng không hợp lệ' });
+    const { limited } = await checkRateWindow(NS_BLOCK, req.user._id.toString(), { maxCount: 20, windowMs: 5 * 60 * 1000 });
+    if (limited) return res.status(429).json({ message: 'Thao tác quá nhanh, thử lại sau' });
+    await friendsService.blockUser(req.user._id, targetId, req.app.get('socketio'));
+    res.json({ message: 'Đã chặn người dùng' });
+  } catch (err) {
+    handleError(res, err);
+  }
+};
+
+exports.unblockUser = async (req, res) => {
+  try {
+    const targetId = req.params.userId;
+    if (!mongoose.Types.ObjectId.isValid(targetId)) return res.status(400).json({ message: 'ID người dùng không hợp lệ' });
+    const { limited } = await checkRateWindow(NS_BLOCK, req.user._id.toString(), { maxCount: 20, windowMs: 5 * 60 * 1000 });
+    if (limited) return res.status(429).json({ message: 'Thao tác quá nhanh, thử lại sau' });
+    await friendsService.unblockUser(req.user._id, targetId);
+    res.json({ message: 'Đã bỏ chặn người dùng' });
   } catch (err) {
     handleError(res, err);
   }

@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const Room = require('../models/Room');
+const { shouldRotateSenderKeyEpoch } = require('../utils/senderKeyRotation');
 const User = require('../models/User');
 const Friendship = require('../models/Friendship');
 const Message = require('../models/Message');
@@ -11,6 +12,8 @@ const { getFriendIdSet, maskRoomMembersPresence } = require('../utils/presenceVi
 const { CHAT_BACKGROUND_KEYS } = require('../utils/chatBackgrounds');
 const roomsListCache = require('../utils/roomsListCache');
 const { createNotification } = require('./notifications.service');
+const { deleteAttachmentsForRoom } = require('./attachments.service');
+const sfu = require('./sfu.service');
 
 const MAX_ROOM_MEMBERS = 50;
 function assertRoomNotFull(room, adding = 1) {
@@ -60,13 +63,12 @@ const ROOM_PERMISSIONS = Object.freeze({
 });
 const GRANTABLE_PERMISSIONS = Object.values(ROOM_PERMISSIONS);
 
-// Quyền lẻ chỉ áp dụng phòng nhóm: host có mọi quyền, admin chỉ tạo khảo sát, thành viên dùng grant trực tiếp.
+// Quyền lẻ chỉ áp dụng phòng nhóm: host và admin có quyền ghim/tạo khảo sát, thành viên dùng grant trực tiếp.
+// DM không có khái niệm host/admin — chỉ ghim tin nhắn hợp lý cho cả 2 phía (không có polls trong DM).
 function hasRoomPermission(room, userId, key) {
-  if (room.isDM) return false;
+  if (room.isDM) return key === ROOM_PERMISSIONS.PIN_MESSAGES;
   if (room.createdBy.toString() === userId.toString()) return true;
-  if (room.admins.some(a => a.toString() === userId.toString())) {
-    return key === ROOM_PERMISSIONS.CREATE_POLLS;
-  }
+  if (room.admins.some(a => a.toString() === userId.toString())) return GRANTABLE_PERMISSIONS.includes(key);
   const granted = room.grantedPermissions?.get(userId.toString());
   return Array.isArray(granted) && (granted.includes(key)
     || (key === ROOM_PERMISSIONS.PIN_MESSAGES && granted.includes('pin')));
@@ -89,6 +91,25 @@ function getLastReadAt(room, userId) {
   return (map instanceof Map ? map.get(key) : map[key]) || null;
 }
 
+// Tin ghim quá hạn TTL (Message.serverExpiresAt, Message.js) bị MongoDB tự xóa ở tầng driver —
+// không đi qua Mongoose middleware nên không nơi nào bắt được để tự dọn Room.pinnedMessage. Tự dò
+// và dọn ngay mỗi lần trả danh sách phòng, thay vì thêm cron/change stream cho một trường hợp hiếm.
+async function healOrphanedPinnedMessages(rooms) {
+  const pinnedIds = rooms.filter(r => r.pinnedMessage).map(r => r.pinnedMessage.toString());
+  if (!pinnedIds.length) return;
+
+  // pre(/^find/) của Message tự loại tin đã hết hạn — còn lại đúng là những tin ghim vẫn hợp lệ.
+  const alive = await Message.find({ _id: { $in: pinnedIds } }).select('_id').lean();
+  const aliveIdSet = new Set(alive.map(m => m._id.toString()));
+
+  const orphanedRooms = rooms.filter(r => r.pinnedMessage && !aliveIdSet.has(r.pinnedMessage.toString()));
+  if (!orphanedRooms.length) return;
+
+  // findByIdAndUpdate (không phải updateMany) để tận dụng hook invalidateMembersCache có sẵn (Room.js).
+  await Promise.all(orphanedRooms.map(r => Room.findByIdAndUpdate(r._id, { pinnedMessage: null })));
+  orphanedRooms.forEach(r => { r.pinnedMessage = null; });
+}
+
 // ─── Room CRUD ──────────────────────────────────────────────────────────────
 
 async function listMyRooms(userId) {
@@ -107,6 +128,8 @@ async function listMyRooms(userId) {
       .lean();
     await roomsListCache.set(userId, rooms);
   }
+
+  await healOrphanedPinnedMessages(rooms);
 
   const friendIdSet = await getFriendIdSet(userId);
   const maskedRooms = rooms.map(roomDoc => {
@@ -138,6 +161,7 @@ async function listMyRooms(userId) {
         $match: {
           sender: { $ne: userId },
           isDeleted: false,
+          serverExpiresAt: { $gt: new Date() },
           $and: [
             { $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }] },
             { $or: roomsNeedingCount.map(r => ({ room: r._id, createdAt: { $gt: r._countCutoff } })) },
@@ -281,8 +305,9 @@ async function addMemberOrRequest(room, userDoc, io, alwaysPending = false) {
   room.memberJoinedAt.set(uidStr, new Date());
   room.pendingRequests = room.pendingRequests.filter(p => p.toString() !== uidStr);
   await room.save();
+  await rotateSenderKeyForMembershipChange(room, io);
 
-  // Báo thành viên cũ để họ phân phối lại Sender Key hiện hành cho người mới.
+  // Epoch mới bảo đảm thành viên vừa vào không có Sender Key của lịch sử cũ.
   if (io) {
     // Populate trước khi emit để lấy đúng activityStatus thật của người mới, tránh hardcode isOnline:true.
     await room.populate('members', userFields.WITH_STATUS);
@@ -554,6 +579,7 @@ async function approveJoinRequest(roomId, adminUserId, targetUserId, io) {
   room.members.push(requester._id);
   room.memberJoinedAt.set(targetUserId, new Date());
   await room.save();
+  await rotateSenderKeyForMembershipChange(room, io);
   await room.populate('members', userFields.WITH_STATUS);
 
   if (io) {
@@ -659,6 +685,7 @@ async function acceptInvite(roomId, user, io) {
   room.members.push(user._id);
   room.memberJoinedAt.set(user._id.toString(), new Date());
   await room.save();
+  await rotateSenderKeyForMembershipChange(room, io);
   await room.populate('members', userFields.WITH_STATUS);
 
   const userIdStr = user._id.toString();
@@ -732,17 +759,72 @@ async function getSenderKeyDoc(roomId, userId, { epoch, senderDeviceId }) {
 // Tăng senderKeyEpoch của phòng + báo cho cả phòng biết — dùng chung bởi rotate-key thủ công
 // và rời/kick thành viên (loại người khỏi nhóm cũng phải buộc tạo Sender Key mới không có họ).
 async function bumpSenderKeyEpoch(room, io) {
-  const updated = await Room.findByIdAndUpdate(room._id, { $inc: { senderKeyEpoch: 1 } }, { new: true });
+  const updated = await Room.findByIdAndUpdate(room._id, {
+    $inc: { senderKeyEpoch: 1 },
+    $set: { senderKeyEpochMessageCount: 0, senderKeyEpochStartedAt: new Date() },
+  }, { new: true });
   if (io) {
     io.to(room._id.toString()).emit('sender_key:rotated', { roomId: room._id.toString(), epoch: updated.senderKeyEpoch });
   }
   return updated.senderKeyEpoch;
 }
 
+async function rotateSenderKeyForMembershipChange(room, io) {
+  const epoch = await bumpSenderKeyEpoch(room, io);
+  room.senderKeyEpoch = epoch;
+  room.senderKeyEpochMessageCount = 0;
+  room.senderKeyEpochStartedAt = new Date();
+}
+
+// Chỉ gọi sau khi Message đã được lưu: epoch cũ chứa đúng 100 tin, rồi client nhận event để
+// mã hóa tin kế tiếp bằng epoch mới. Mốc 14 ngày cũng lazy, tức tin đầu tiên sau mốc sẽ kích hoạt xoay.
+async function rotateSenderKeyEpochAfterMessage(room, epoch, io) {
+  const counted = await Room.findOneAndUpdate(
+    { _id: room._id, senderKeyEpoch: epoch },
+    { $inc: { senderKeyEpochMessageCount: 1 } },
+    { new: true }
+  );
+  if (!counted || !shouldRotateSenderKeyEpoch({
+    messageCount: counted.senderKeyEpochMessageCount,
+    startedAt: counted.senderKeyEpochStartedAt,
+  })) return false;
+
+  const updated = await Room.findOneAndUpdate(
+    { _id: room._id, senderKeyEpoch: epoch },
+    {
+      $inc: { senderKeyEpoch: 1 },
+      $set: { senderKeyEpochMessageCount: 0, senderKeyEpochStartedAt: new Date() },
+    },
+    { new: true }
+  );
+  if (!updated) return false;
+
+  if (io) {
+    io.to(room._id.toString()).emit('sender_key:rotated', { roomId: room._id.toString(), epoch: updated.senderKeyEpoch });
+  }
+  return true;
+}
+
 async function rotateSenderKey(roomId, userId, io) {
   const room = await requireMembership(userId, roomId);
   const epoch = await bumpSenderKeyEpoch(room, io);
   return { roomId: room._id, epoch };
+}
+
+// Đổi khóa hoặc thiết bị của một người phải tạo epoch DM mới để thiết bị cũ/đã thu hồi không
+// giải mã các tin nhắn gửi sau đó. Nhóm giữ nguyên luồng xoay khóa hiện có.
+async function rotateDmSenderKeyEpochsForUser(userId, io) {
+  const rooms = await Room.find({ isDM: true, members: userId }).select('_id members');
+  const memberIds = new Set();
+  await Promise.all(rooms.map(async room => {
+    const updated = await Room.findByIdAndUpdate(room._id, {
+      $inc: { senderKeyEpoch: 1 },
+      $set: { senderKeyEpochMessageCount: 0, senderKeyEpochStartedAt: new Date() },
+    }, { new: true }).select('senderKeyEpoch members');
+    (updated?.members || room.members || []).forEach(memberId => memberIds.add(memberId.toString()));
+    if (io) io.to(room._id.toString()).emit('sender_key:rotated', { roomId: room._id.toString(), epoch: updated.senderKeyEpoch });
+  }));
+  await Promise.all([...memberIds].map(memberId => roomsListCache.invalidate(memberId)));
 }
 
 // ─── Thành viên / quản trị viên / chủ phòng ─────────────────────────────────
@@ -772,6 +854,7 @@ async function deleteRoomData(roomId) {
   await Promise.all([
     Message.deleteMany({ room: roomId }),
     SenderKeyDistribution.deleteMany({ room: roomId }),
+    deleteAttachmentsForRoom(roomId),
   ]);
 }
 
@@ -786,6 +869,9 @@ async function removeMemberFromRoom(room, userId, io, preferredNewOwnerId, kicke
   if (remainingMembers.length === 0) {
     await deleteRoomData(room._id);
     await Room.findByIdAndDelete(room._id);
+    // Rời khỏi cuộc gọi nhóm đang tham gia (nếu có) trước khi báo Sidebar — người này không còn là
+    // thành viên phòng, quyền vào call chỉ check ở lúc join nên phải chủ động ngắt ở đây.
+    sfu.forceLeaveRoomForUser(room._id.toString(), uidStr);
     // Báo cho chính người vừa rời (thành viên cuối cùng) — Sidebar chỉ gỡ phòng qua sự kiện này.
     if (io) {
       const allSockets = await io.fetchSockets();
@@ -815,6 +901,16 @@ async function removeMemberFromRoom(room, userId, io, preferredNewOwnerId, kicke
   }
 
   await room.save();
+
+  // Rời khỏi cuộc gọi nhóm đang tham gia (nếu có) — cùng lý do với nhánh phòng bị xóa ở trên.
+  // sfu.service không có io nên báo call:group-peer-left ở đây để người còn lại gỡ đúng tile.
+  const forcedFromCall = sfu.forceLeaveRoomForUser(room._id.toString(), uidStr);
+  if (io && forcedFromCall.length > 0) {
+    io.to(room._id.toString()).emit('call:group-peer-left', { userId: uidStr });
+    if (sfu.getParticipantCount(room._id.toString()) === 0) {
+      io.to(room._id.toString()).emit('call:group-ended', { roomId: room._id.toString() });
+    }
+  }
 
   if (io) {
     io.to(room._id.toString()).emit('room:member_left', { roomId: room._id.toString(), userId: uidStr });
@@ -876,6 +972,9 @@ async function deleteRoom(roomId, userId, io) {
 
   await deleteRoomData(room._id);
   await Room.findByIdAndDelete(room._id);
+
+  // Phòng bị hủy — mọi người đang trong cuộc gọi nhóm (nếu có) đều phải rời, không chỉ chủ phòng.
+  memberIds.forEach(memberId => sfu.forceLeaveRoomForUser(roomIdStr, memberId));
 
   if (io) {
     io.to(roomIdStr).emit('room:removed', { roomId: roomIdStr, reason: 'deleted' });
@@ -1033,6 +1132,8 @@ module.exports = {
   distributeSenderKey,
   getSenderKeyDoc,
   rotateSenderKey,
+  rotateSenderKeyEpochAfterMessage,
+  rotateDmSenderKeyEpochsForUser,
   leaveRoom,
   deleteRoom,
   kickMember,

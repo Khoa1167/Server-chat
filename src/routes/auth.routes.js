@@ -16,6 +16,7 @@ router.post('/passkey/login/options', authController.getPasskeyLoginOptions);
 router.post('/passkey/login/verify', authController.verifyPasskeyLogin);
 router.get('/login-history', protect, authController.getLoginHistory);
 router.get('/me', protect, authController.me);
+router.get('/call-ice-servers', protect, requireDeviceSession, authController.getCallIceServers);
 
 // ─── Authenticator App (TOTP) — chỉ phiên thiết bị đầy đủ được quản lý ───────
 router.post('/totp/setup', protect, requireDeviceSession, authController.beginTotpSetup);
@@ -30,9 +31,14 @@ router.post('/passkey/register/options', protect, requireDeviceSession, authCont
 router.post('/passkey/register/verify', protect, requireDeviceSession, authController.finishPasskeyRegistration);
 router.patch('/passkeys/:credentialId', protect, requireDeviceSession, authController.renamePasskey);
 router.delete('/passkeys/:credentialId', protect, requireDeviceSession, authController.removePasskey);
-router.put('/history-backup', protect, requireDeviceSession, authController.saveHistoryBackup);
-router.get('/history-backup', protect, requireDeviceSession, authController.getHistoryBackup);
-router.delete('/history-backup', protect, requireDeviceSession, authController.deleteHistoryBackup);
+router.post('/device-link', protect, requireDeviceSession, authController.createDeviceLinkTransfer);
+router.post('/device-link/code', protect, requireDeviceSession, authController.approveDeviceLinkByCode);
+router.post('/device-link/:id/approve', protect, requireDeviceSession, authController.approveDeviceLinkTransfer);
+router.post('/device-link/:id/archive', protect, requireDeviceSession, authController.reserveDeviceLinkArchive);
+router.post('/device-link/:id/archive/parts/:partNumber', protect, requireDeviceSession, authController.getDeviceLinkArchivePartUploadUrl);
+router.post('/device-link/:id/archive/complete', protect, requireDeviceSession, authController.completeDeviceLinkArchive);
+router.get('/device-link/:id/archive', protect, requireDeviceSession, authController.getDeviceLinkArchive);
+router.delete('/device-link/:id/archive', protect, requireDeviceSession, authController.acknowledgeDeviceLinkArchive);
 
 // ─── Hồ sơ cá nhân ───────────────────────────────────────────────────────────
 router.put('/profile', protect, authController.updateProfile);

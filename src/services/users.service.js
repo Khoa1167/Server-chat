@@ -3,11 +3,11 @@ const Room = require('../models/Room');
 const AppError = require('../utils/AppError');
 const deviceKeysCache = require('../utils/deviceKeysCache');
 
-// Lọc publicKey thiết bị active rồi cache lại — dùng chung cho getUserDevices và getUsersDevicesBatch.
+// Lọc publicKey thiết bị active rồi cache lại — dùng chung cho các luồng lấy device key.
 function formatAndCache(userDoc) {
   const devices = userDoc.devices
     .filter(d => !d.isRevoked)
-  .map(d => ({ deviceId: d.deviceId, e2eeKeyId: d.e2eeKeyId || d.deviceId, publicKey: d.publicKey }));
+  .map(d => ({ deviceId: d.deviceId, e2eeKeyId: d.e2eeKeyId || d.deviceId, publicKey: d.publicKey, registeredAt: d.registeredAt }));
   return deviceKeysCache.set(userDoc._id, devices);
 }
 
@@ -19,7 +19,7 @@ async function getUserDevices(callerId, targetUserId) {
   }
 
   const cached = await deviceKeysCache.get(targetUserId);
-  if (cached) return cached;
+  if (cached?.every(d => d.registeredAt)) return cached;
 
   const targetUser = await User.findById(targetUserId).select('devices');
   if (!targetUser) {
@@ -29,13 +29,13 @@ async function getUserDevices(callerId, targetUserId) {
   return formatAndCache(targetUser);
 }
 
-// Thay cho việc gọi getUserDevices lặp lại theo từng thành viên phòng (N+1 request).
-async function getUsersDevicesBatch(callerId, userIds) {
-  // Yêu cầu có 1 phòng chứa đủ caller lẫn toàn bộ userIds — chặn enumerate publicKey user không chung phòng.
-  const sharesRoom = await Room.exists({ members: { $all: [callerId, ...userIds] } });
-  if (!sharesRoom) {
-    throw new AppError('Bạn không có phòng chung với các người dùng này', 403);
+// Thành viên phòng luôn do server đọc để client state cũ không chặn phân phối Sender Key.
+async function getRoomDevices(callerId, roomId) {
+  const room = await Room.findOne({ _id: roomId, members: callerId }).select('members');
+  if (!room) {
+    throw new AppError('Bạn không có quyền truy cập phòng này', 403);
   }
+  const userIds = room.members;
 
   // Cache theo từng user (tận dụng lại giữa các phòng chung thành viên) — chỉ cache-miss mới cần 1 query $in gộp.
   const cacheResults = await Promise.all(
@@ -52,4 +52,4 @@ async function getUsersDevicesBatch(callerId, userIds) {
   return cacheResults.flatMap(([id, cached]) => cached || freshByUserId.get(id) || []);
 }
 
-module.exports = { getUserDevices, getUsersDevicesBatch };
+module.exports = { getUserDevices, getRoomDevices };

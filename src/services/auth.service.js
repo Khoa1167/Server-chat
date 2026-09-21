@@ -9,7 +9,6 @@ const EmailChange = require('../models/EmailChange');
 const LoginHistory = require('../models/LoginHistory');
 const MfaChallenge = require('../models/MfaChallenge');
 const PasskeyCredential = require('../models/PasskeyCredential');
-const HistoryBackup = require('../models/HistoryBackup');
 const webauthn = require('../utils/auth/webauthn');
 const { isAdminIpAllowed } = require('../middleware/auth');
 const {
@@ -33,6 +32,7 @@ const deviceKeysCache = require('../utils/deviceKeysCache');
 const { signJwt, verifyJwt } = require('../utils/auth/jwtKeys');
 const { generateDeviceToken, hashDeviceToken } = require('../utils/auth/deviceToken');
 const AppError = require('../utils/AppError');
+const { rotateDmSenderKeyEpochsForUser } = require('./rooms.service');
 const {
   generateTotpSecret,
   buildTotpUri,
@@ -251,7 +251,6 @@ const NS_MFA_LOGIN = 'mfa-login';
 const NS_MFA_LOGIN_IP = 'mfa-login-ip';
 const NS_TOTP_MANAGEMENT_PASSWORD = 'totp-management-password';
 const NS_MFA_MANAGEMENT_FACTOR = 'mfa-management-factor';
-const NS_HISTORY_BACKUP = 'history-backup';
 const NS_TOTP_SETUP_CONFIRM = 'totp-setup-confirm';
 const TOTP_USER_FIELDS = '+totpSecret +totpPendingSecret +totpPendingExpiresAt +totpLastUsedStep +totpRecoveryCodes';
 
@@ -325,6 +324,7 @@ function revokeOtherDevices(user, currentDeviceId) {
 
 async function finishSecurityChange(io, userId, revokedDeviceIds) {
   if (!revokedDeviceIds.length) return;
+  await rotateDmSenderKeyEpochsForUser(userId, io);
   triggerDebouncedKeyChanged(io, userId);
   if (!io) return;
   const revoked = new Set(revokedDeviceIds);
@@ -649,7 +649,7 @@ async function finishPasskeyRegistration(currentUser, { challengeToken, registra
   const count = await PasskeyCredential.countDocuments({ user: currentUser._id });
   let created;
   try {
-    created = await PasskeyCredential.create({ user: currentUser._id, credentialId: credential.id, publicKey: credential.publicKey, counter: credential.counter, transports: credential.transports || [], aaguid: info.aaguid || '', name: String(name || 'Passkey').trim().slice(0, 50) || 'Passkey' });
+    created = await PasskeyCredential.create({ user: currentUser._id, credentialId: credential.id, publicKey: Buffer.from(credential.publicKey), counter: credential.counter, transports: credential.transports || [], aaguid: info.aaguid || '', name: String(name || 'Passkey').trim().slice(0, 50) || 'Passkey' });
   } catch (err) {
     if (err?.code === 11000) throw new AppError('Passkey này đã được đăng ký', 409);
     throw err;
@@ -682,36 +682,6 @@ async function removePasskey(currentUser, credentialId, proof = {}) {
   if (!remaining && !currentUser.totpEnabled) throw new AppError('Bật TOTP hoặc thêm Passkey khác trước khi gỡ Passkey cuối.', 400);
   await credential.deleteOne();
   return { message: 'Đã gỡ Passkey' };
-}
-
-async function saveHistoryBackup(currentUser, { ciphertext, iv, sourceDeviceId, sourceE2eeKeyId, ...proof } = {}) {
-  await verifyManagementAuth(currentUser, proof);
-  if (![ciphertext, iv, sourceDeviceId, sourceE2eeKeyId].every(value => typeof value === 'string' && value.length)) {
-    throw new AppError('Bản sao lưu không hợp lệ', 400);
-  }
-  if (ciphertext.length > 7 * 1024 * 1024 || iv.length > 64 || sourceDeviceId.length > 128 || sourceE2eeKeyId.length > 128) {
-    throw new AppError('Bản sao lưu vượt quá giới hạn cho phép', 413);
-  }
-  const limit = await checkRateWindow(NS_HISTORY_BACKUP, currentUser._id.toString(), { maxCount: 10, windowMs: 60 * 60 * 1000 });
-  if (limit.limited) throw new AppError('Bạn đã cập nhật bản sao lưu quá nhiều lần. Vui lòng thử lại sau.', 429);
-  const backup = await HistoryBackup.findOneAndUpdate(
-    { user: currentUser._id },
-    { $set: { version: 1, ciphertext, iv, sourceDeviceId, sourceE2eeKeyId } },
-    { new: true, upsert: true, runValidators: true },
-  );
-  return { message: 'Đã lưu bản sao lưu lịch sử được mã hóa', updatedAt: backup.updatedAt };
-}
-
-async function getHistoryBackup(userId) {
-  const backup = await HistoryBackup.findOne({ user: userId }).select('version ciphertext iv sourceDeviceId sourceE2eeKeyId updatedAt');
-  if (!backup) throw new AppError('Chưa có bản sao lưu lịch sử', 404);
-  return backup;
-}
-
-async function deleteHistoryBackup(currentUser, proof = {}) {
-  await verifyManagementAuth(currentUser, proof);
-  await HistoryBackup.deleteOne({ user: currentUser._id });
-  return { message: 'Đã xóa bản sao lưu lịch sử' };
 }
 
 async function getLoginHistory(userId) {
@@ -1205,7 +1175,6 @@ async function resetPassword({ email, resetToken, newPassword }) {
 
 // Rate limit namespaces cho device management
 const NS_DEVICE_PASSWORD = 'device-password';
-const NS_DEVICE_MUTATION = 'device-mutation';
 const NS_DEVICE_RENEWAL = 'device-renewal';
 
 // Helper emit debounced key:changed event
@@ -1310,12 +1279,6 @@ async function registerOrRenewDevice(currentUser, { deviceId, e2eeKeyId, publicK
           throw new AppError('Tài khoản đã đạt giới hạn 5 thiết bị đang hoạt động. Vui lòng gỡ bớt thiết bị cũ.', 400);
         }
 
-        const mutLimit = await checkRateWindow(NS_DEVICE_MUTATION, userId, { maxCount: 3, windowMs: 3600000 });
-        if (mutLimit.limited) {
-          if (isReplicaSet && session) { await session.abortTransaction(); session.endSession(); }
-          throw new AppError('Bạn đã thay đổi thiết bị quá 3 lần/giờ. Vui lòng thử lại sau.', 429);
-        }
-
         user.devices.push({
           deviceId,
           e2eeKeyId: e2eeKeyId || deviceId,
@@ -1329,12 +1292,6 @@ async function registerOrRenewDevice(currentUser, { deviceId, e2eeKeyId, publicK
         shouldEmitThisTry = true;
       } else if (existingDevice.isRevoked) {
         // Nhánh 2: Device tồn tại và isRevoked === true (Reactivation)
-        const mutLimit = await checkRateWindow(NS_DEVICE_MUTATION, userId, { maxCount: 3, windowMs: 3600000 });
-        if (mutLimit.limited) {
-          if (isReplicaSet && session) { await session.abortTransaction(); session.endSession(); }
-          throw new AppError('Bạn đã thay đổi thiết bị quá 3 lần/giờ. Vui lòng thử lại sau.', 429);
-        }
-
         existingDevice.isRevoked = false;
         existingDevice.revokedAt = null;
         existingDevice.publicKey = publicKey;
@@ -1358,12 +1315,6 @@ async function registerOrRenewDevice(currentUser, { deviceId, e2eeKeyId, publicK
           shouldEmitThisTry = false;
         } else {
           // Case 3b: Key Rotation / Mất Storage (publicKey khác cũ)
-          const mutLimit = await checkRateWindow(NS_DEVICE_MUTATION, userId, { maxCount: 3, windowMs: 3600000 });
-          if (mutLimit.limited) {
-            if (isReplicaSet && session) { await session.abortTransaction(); session.endSession(); }
-            throw new AppError('Bạn đã thay đổi thiết bị quá 3 lần/giờ. Vui lòng thử lại sau.', 429);
-          }
-
           existingDevice.publicKey = publicKey;
           if (deviceName) existingDevice.deviceName = deviceName;
           existingDevice.tokenHash = tokenHash;
@@ -1408,6 +1359,7 @@ async function registerOrRenewDevice(currentUser, { deviceId, e2eeKeyId, publicK
   }
 
   if (finalShouldEmit) {
+    await rotateDmSenderKeyEpochsForUser(currentUser._id, io);
     triggerDebouncedKeyChanged(io, currentUser._id);
   }
 
@@ -1454,6 +1406,7 @@ async function revokeDevice(currentUser, deviceId, currentPassword, io) {
 
   await currentUser.save();
 
+  await rotateDmSenderKeyEpochsForUser(currentUser._id, io);
   triggerDebouncedKeyChanged(io, currentUser._id);
 
   return { message: 'Đã gỡ bỏ thiết bị thành công', deviceId };
@@ -1501,9 +1454,6 @@ module.exports = {
   finishPasskeyRegistration,
   renamePasskey,
   removePasskey,
-  saveHistoryBackup,
-  getHistoryBackup,
-  deleteHistoryBackup,
   getLoginHistory,
   updateProfile,
   requestEmailChange,

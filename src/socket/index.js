@@ -7,7 +7,7 @@ const logger = require('../config/logger');
 const registerMessageHandlers = require('./handlers/message.handler');
 const registerRoomHandlers = require('./handlers/room.handler');
 const registerCallHandlers = require('./handlers/call.handler');
-const registerFriendHandlers = require('./handlers/friend.handler');
+const registerGroupCallHandlers = require('./handlers/groupCall.handler');
 const registerPresenceHandlers = require('./handlers/presence.handler');
 
 const setupSocket = (io) => {
@@ -58,7 +58,7 @@ const setupSocket = (io) => {
     registerMessageHandlers(io, socket);
     registerRoomHandlers(io, socket);
     registerCallHandlers(io, socket);
-    registerFriendHandlers(io, socket);
+    registerGroupCallHandlers(io, socket);
   });
 };
 

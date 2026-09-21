@@ -46,6 +46,9 @@ const roomSchema = new mongoose.Schema({
   pinnedMessage: { type: mongoose.Schema.Types.ObjectId, ref: 'Message', default: null },
   // Epoch hiện tại của Sender Key mã hóa nhóm — tăng lên khi rotate khóa (server/src/routes/rooms.js PUT /:id/rotate-key)
   senderKeyEpoch: { type: Number, default: 0 },
+  // Epoch xoay lazy sau 100 tin nhắn hoặc khi tin nhắn đầu tiên được gửi sau 14 ngày.
+  senderKeyEpochMessageCount: { type: Number, default: 0 },
+  senderKeyEpochStartedAt: { type: Date, default: Date.now },
 }, { timestamps: true });
 
 // Room.find({members: userId}) chạy ở MỖI lần connect socket (join lại toàn bộ phòng) + mọi route

@@ -1,35 +1,7 @@
 const router = require('express').Router();
-const multer = require('multer');
 const { protect } = require('../middleware/auth');
 const { uploadRoomAvatar, uploadChatBackground } = require('../config/cloudinary');
 const roomsController = require('../controllers/rooms.controller');
-
-// Client giờ mã hóa E2EE byte ảnh/audio trước khi upload (xem
-// client/src/components/Chat/ChatWindow.jsx — encryptFileForRoom) — server chỉ nhận được
-// ciphertext vô nghĩa, không thể kiểm tra mimetype thật nữa nên bỏ fileFilter ở cả 3 route.
-const uploadAudio = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
-});
-
-const uploadImage = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
-});
-
-const uploadFile = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }
-});
-
-// Dịch lỗi multer (vượt giới hạn dung lượng...) thành response 400 gọn, thay vì để Express
-// default error handler xử lý — dùng chung cho cả 3 route upload bên dưới.
-const handleUpload = (multerMiddleware, field) => (req, res, next) => {
-  multerMiddleware.single(field)(req, res, (err) => {
-    if (err) return res.status(400).json({ message: err.message });
-    next();
-  });
-};
 
 // GET /api/rooms — lấy danh sách phòng của user
 router.get('/', protect, roomsController.listMyRooms);
@@ -42,6 +14,9 @@ router.get('/all', protect, roomsController.listPublicRooms);
 
 // GET /api/rooms/:id/messages — lấy tin nhắn của phòng
 router.get('/:id/messages', protect, roomsController.getRoomMessages);
+
+// GET /api/rooms/:id/devices — lấy public keys của thành viên hiện tại do server xác định
+router.get('/:id/devices', protect, roomsController.getRoomDevices);
 
 // POST /api/rooms/:id/join — tham gia phòng (chỉ phòng công khai — tìm qua /all)
 router.post('/:id/join', protect, roomsController.joinPublicRoom);
@@ -70,6 +45,11 @@ router.put('/:id/chat-background', protect, roomsController.updateChatBackground
 
 // POST /api/rooms/:id/chat-background/image — ảnh nền dùng chung cho toàn phòng.
 router.post('/:id/chat-background/image', protect, uploadChatBackground.single('image'), roomsController.updateChatBackgroundImage);
+
+// Attachment E2EE: server chỉ cấp URL R2 tạm thời sau khi kiểm tra thành viên phòng.
+router.post('/:id/attachments', protect, roomsController.createAttachmentUpload);
+router.post('/:id/attachments/:attachmentId/complete', protect, roomsController.completeAttachmentUpload);
+router.get('/:id/attachments/:attachmentId/download-url', protect, roomsController.getAttachmentDownloadUrl);
 
 router.put('/:id/chat-message-color', protect, roomsController.updateChatMessageColor);
 
@@ -129,14 +109,5 @@ router.put('/:id/owner/:userId', protect, roomsController.transferOwnership);
 // (vd pin_messages/create_polls — body { permission }).
 router.put('/:id/permissions/:userId', protect, roomsController.grantPermission);
 router.delete('/:id/permissions/:userId', protect, roomsController.revokePermission);
-
-// POST /api/rooms/upload-audio — tải lên tệp âm thanh (tin nhắn thoại)
-router.post('/upload-audio', protect, handleUpload(uploadAudio, 'audio'), roomsController.uploadAudio);
-
-// POST /api/rooms/upload-image — tải lên hình ảnh
-router.post('/upload-image', protect, handleUpload(uploadImage, 'image'), roomsController.uploadImage);
-
-// POST /api/rooms/upload-file — tải lên tệp tin chung
-router.post('/upload-file', protect, handleUpload(uploadFile, 'file'), roomsController.uploadFile);
 
 module.exports = router;
