@@ -6,13 +6,17 @@ const isSecure = process.env.COOKIE_SECURE
   ? process.env.COOKIE_SECURE === 'true'
   : process.env.NODE_ENV === 'production';
 
-// Cookie phiên (không maxAge/expires, tự xóa khi đóng trình duyệt), httpOnly chống XSS đọc được.
-const setAuthCookie = (res, token) => {
+const REMEMBER_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 ngày
+
+// Mặc định cookie phiên (không maxAge, tự xóa khi đóng trình duyệt), httpOnly chống XSS đọc được.
+// remember=true (user tự chọn "Ghi nhớ đăng nhập") mới kéo dài thành cookie 30 ngày.
+const setAuthCookie = (res, token, remember = false) => {
   res.cookie(COOKIE_NAME, token, {
     httpOnly: true,
     secure: isSecure,
     sameSite: 'lax',
     path: '/',
+    ...(remember ? { maxAge: REMEMBER_MAX_AGE_MS } : {}),
   });
 };
 

@@ -254,6 +254,14 @@ exports.updateAvatar = async (req, res) => {
   }
 };
 
+exports.removeAvatar = async (req, res) => {
+  try {
+    res.json(await authService.removeAvatar(req.user));
+  } catch (err) {
+    handleError(res, err);
+  }
+};
+
 exports.updateCover = async (req, res) => {
   try {
     res.json(await authService.updateCover(req.user, req.file));
@@ -328,7 +336,7 @@ exports.registerOrRenewDevice = async (req, res) => {
   try {
     const io = req.app.get('socketio');
     const { token, ...result } = await authService.registerOrRenewDevice(req.user, req.body, io);
-    setAuthCookie(res, token);
+    setAuthCookie(res, token, !!req.body.remember);
     res.json(result);
   } catch (err) {
     handleWithCustomFallback(res, err, req.log, 'PUT /api/auth/devices error', 'Lỗi đăng ký thiết bị');

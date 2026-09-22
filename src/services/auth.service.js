@@ -928,10 +928,7 @@ async function changePassword(currentUser, { currentPassword, newPassword }) {
   return { message: 'Đổi mật khẩu thành công' };
 }
 
-async function updateAvatar(currentUser, file) {
-  if (!file)
-    throw new AppError('Không có file ảnh', 400);
-
+function checkAvatarCooldown(currentUser) {
   if (currentUser.avatarChangedAt) {
     const daysSinceChange = (Date.now() - new Date(currentUser.avatarChangedAt)) / (1000 * 60 * 60 * 24);
     if (daysSinceChange < 1) {
@@ -939,6 +936,12 @@ async function updateAvatar(currentUser, file) {
       throw new AppError(`Bạn chỉ có thể đổi ảnh đại diện sau ${hoursLeft} giờ nữa`, 400);
     }
   }
+}
+
+async function updateAvatar(currentUser, file) {
+  if (!file)
+    throw new AppError('Không có file ảnh', 400);
+  checkAvatarCooldown(currentUser);
 
   const oldAvatar = currentUser.avatar;
   const avatarUrl = file.path; // Cloudinary trả về URL trong path
@@ -953,6 +956,20 @@ async function updateAvatar(currentUser, file) {
     deleteCloudinaryImage(oldAvatar);
   }
 
+  return user;
+}
+
+async function removeAvatar(currentUser) {
+  checkAvatarCooldown(currentUser);
+
+  const oldAvatar = currentUser.avatar;
+  const user = await User.findByIdAndUpdate(
+    currentUser._id,
+    { avatar: '', avatarChangedAt: new Date() },
+    { returnDocument: 'after' }
+  );
+
+  if (oldAvatar) deleteCloudinaryImage(oldAvatar);
   return user;
 }
 
@@ -1470,6 +1487,7 @@ module.exports = {
   verifyEmailChange,
   changePassword,
   updateAvatar,
+  removeAvatar,
   updateCover,
   removeCover,
   forgotPassword,

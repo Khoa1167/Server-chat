@@ -46,6 +46,7 @@ router.post('/request-email-change', protect, authController.requestEmailChange)
 router.post('/verify-email-change', protect, authController.verifyEmailChange);
 router.put('/change-password', protect, authController.changePassword);
 router.post('/avatar', protect, uploadAvatar.single('avatar'), authController.updateAvatar);
+router.delete('/avatar', protect, authController.removeAvatar);
 router.post('/cover', protect, uploadCover.single('cover'), authController.updateCover);
 router.delete('/cover', protect, authController.removeCover);
 
