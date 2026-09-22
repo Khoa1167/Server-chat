@@ -12,6 +12,7 @@ router.get('/requests', protect, friendsController.listPendingRequests);
 router.get('/search', protect, friendsController.searchUsers);
 
 router.get('/blocked', protect, friendsController.listBlocked);
+router.get('/blocked/ids', protect, friendsController.listBlockedIds);
 router.post('/block/:userId', protect, friendsController.blockUser);
 router.delete('/block/:userId', protect, friendsController.unblockUser);
 

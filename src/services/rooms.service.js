@@ -4,6 +4,7 @@ const { shouldRotateSenderKeyEpoch } = require('../utils/senderKeyRotation');
 const User = require('../models/User');
 const Friendship = require('../models/Friendship');
 const Message = require('../models/Message');
+const { isBlocked } = require('./blocks.service');
 const SenderKeyDistribution = require('../models/SenderKeyDistribution');
 const userFields = require('../utils/publicUserFields');
 const AppError = require('../utils/AppError');
@@ -180,6 +181,12 @@ async function listMyRooms(userId) {
 async function createRoom({ name, description, isPrivate, joinPolicy, members }, creatorId, io) {
   if (1 + (members || []).length > MAX_ROOM_MEMBERS) {
     throw new AppError(`Phòng đã đạt giới hạn tối đa ${MAX_ROOM_MEMBERS} thành viên`, 400);
+  }
+
+  for (const memberId of members || []) {
+    if (await isBlocked(creatorId, memberId)) {
+      throw new AppError('Không thể thêm người này vào nhóm', 403);
+    }
   }
 
   const room = await Room.create({
@@ -574,6 +581,10 @@ async function approveJoinRequest(roomId, adminUserId, targetUserId, io) {
   const requester = await User.findById(targetUserId).select(userFields.BASIC);
   if (!requester) throw new AppError('Người dùng không tồn tại', 404);
 
+  if (await isBlocked(adminUserId, targetUserId)) {
+    throw new AppError('Không thể duyệt yêu cầu tham gia của người này', 403);
+  }
+
   assertRoomNotFull(room);
   room.pendingRequests = room.pendingRequests.filter(p => p.toString() !== targetUserId);
   room.members.push(requester._id);
@@ -638,6 +649,10 @@ async function inviteFriend(roomId, inviter, targetId, io) {
   }
   if (room.pendingInvites.some(p => p.toString() === targetId)) {
     throw new AppError('Đã gửi lời mời cho người này rồi', 400);
+  }
+
+  if (await isBlocked(inviter._id, targetId)) {
+    throw new AppError('Không thể mời người này vào nhóm', 403);
   }
 
   const isFriend = await Friendship.findOne({

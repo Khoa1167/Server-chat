@@ -368,6 +368,14 @@ async function login({ username, password, turnstileToken }, ip, userAgent, log)
     recordLoginHistory(user._id, false);
     throw new AppError('Tài khoản đã bị khóa bởi quản trị viên', 403);
   }
+  if (user.isDeleted) {
+    recordLoginHistory(user._id, false);
+    throw new AppError('Tài khoản đã bị xóa', 403);
+  }
+  if (user.pendingDeletionAt) {
+    recordLoginHistory(user._id, false);
+    throw new AppError('Tài khoản đang chờ xóa. Khôi phục qua email trước khi đăng nhập lại.', 403, { code: 'PENDING_DELETION' });
+  }
 
   if (user.role === 'admin' && !isAdminIpAllowed(ip)) {
     recordLoginHistory(user._id, false);
@@ -408,7 +416,7 @@ async function verifyTotpLogin({ challengeToken, code } = {}, ip, log) {
 
   const user = await User.findById(challenge.user).select(TOTP_USER_FIELDS);
   const hasPasskey = user ? !!(await PasskeyCredential.exists({ user: user._id })) : false;
-  if (!user || (!user.totpEnabled && !hasPasskey) || user.isBanned ||
+  if (!user || (!user.totpEnabled && !hasPasskey) || user.isBanned || user.isDeleted || user.pendingDeletionAt ||
       (user.passwordChangedAt && challenge.createdAt < user.passwordChangedAt)) {
     challenge.usedAt = new Date();
     await challenge.save();
@@ -1434,6 +1442,8 @@ async function logout(currentUser, deviceId) {
 }
 
 module.exports = {
+  generateOTP,
+  hashOTP,
   sendRegisterOtp,
   verifyRegisterOtp,
   checkUsernameAvailable,

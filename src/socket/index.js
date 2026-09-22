@@ -24,6 +24,7 @@ const setupSocket = (io) => {
       }).select('-password');
       if (!socket.user) return next(new Error('User not found'));
       if (socket.user.isBanned) return next(new Error('Account banned'));
+      if (socket.user.isDeleted || socket.user.pendingDeletionAt) return next(new Error('Account deleted'));
       socket.data.user = socket.user;
       socket.data.deviceId = socket.user.devices.find(device =>
         device.tokenHash === tokenHash && !device.isRevoked

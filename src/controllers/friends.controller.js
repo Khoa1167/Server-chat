@@ -139,6 +139,14 @@ exports.listBlocked = async (req, res) => {
   }
 };
 
+exports.listBlockedIds = async (req, res) => {
+  try {
+    res.json({ ids: await friendsService.listBlockedIds(req.user._id) });
+  } catch (err) {
+    handleError(res, err);
+  }
+};
+
 exports.blockUser = async (req, res) => {
   try {
     const targetId = req.params.userId;

@@ -44,6 +44,8 @@ const userSchema = new mongoose.Schema({
   lastSeen:          { type: Date, default: Date.now },
   role:              { type: String, enum: ['user', 'admin'], default: 'user' }, // Quản trị toàn hệ thống (duyệt report...) — khác "chủ phòng/admin" cấp nhóm chat
   isBanned:          { type: Boolean, default: false }, // Admin khóa tài khoản — chặn login mới + request/socket connect mới bằng token cũ
+  pendingDeletionAt: { type: Date, default: null }, // User tự yêu cầu xóa — set = đang chờ xóa, chặn login. Bất kỳ giá trị non-null đều chặn (không so thời điểm ở phía check-login, job purge tự lo khi tới hạn)
+  isDeleted:         { type: Boolean, default: false }, // true = đã purge — tombstone vĩnh viễn, KHÔNG xóa document (Message.sender/Room.members còn tham chiếu)
   reportTrustScore:            { type: Number, default: 100, min: 10, max: 100 }, // Điểm tin cậy báo cáo (Sàn tối thiểu: 10)
   reportCooldownAt:            { type: Date, default: null },                   // Cooldown nếu bị phát hiện spam report
   dailyTrustScoreIncrease:     { type: Number, default: 0 },                    // Điểm đã cộng trong ngày (Tối đa +15/ngày)

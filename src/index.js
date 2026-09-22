@@ -15,6 +15,7 @@ const pinoHttp = require('pino-http');
 const sendServerError = require('./utils/sendServerError');
 const { cleanupExpiredTransfers } = require('./services/deviceLink.service');
 const { cleanupExpiredAttachments } = require('./services/attachments.service');
+const { purgeExpiredAccountDeletions } = require('./services/accountDeletion.service');
 
 const app = express();
 const server = http.createServer(app);
@@ -105,6 +106,7 @@ cleanupExpiredAttachments().catch(err => logger.error({ err }, 'Không thể d�
 const deviceLinkCleanupTimer = setInterval(() => {
   cleanupExpiredTransfers().catch(err => logger.error({ err }, 'Không thể dọn archive liên kết thiết bị'));
   cleanupExpiredAttachments().catch(err => logger.error({ err }, 'Không thể dọn attachment hết hạn'));
+  purgeExpiredAccountDeletions(io).catch(err => logger.error({ err }, 'Không thể purge tài khoản hết hạn xóa'));
 }, 60 * 1000);
 deviceLinkCleanupTimer.unref();
 

@@ -54,6 +54,11 @@ router.post('/forgot-password', authController.forgotPassword);
 router.post('/verify-reset-otp', authController.verifyResetOtp);
 router.post('/reset-password', authController.resetPassword);
 
+// ─── Xóa tài khoản / khôi phục trong 14 ngày ────────────────────────────────
+router.post('/request-account-deletion', protect, authController.requestAccountDeletion);
+router.post('/request-account-recovery', authController.requestAccountRecovery);
+router.post('/verify-account-recovery', authController.verifyAccountRecovery);
+
 // ─── Thiết bị (device management) ───────────────────────────────────────────
 router.put('/devices', protect, authController.registerOrRenewDevice);
 router.delete('/devices/:deviceId', protect, authController.revokeDevice);

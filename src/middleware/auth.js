@@ -15,6 +15,8 @@ const protect = async (req, res, next) => {
     }).select('-password');
     if (deviceOwner) {
       if (deviceOwner.isBanned) return res.status(403).json({ message: 'Tài khoản đã bị khóa bởi quản trị viên' });
+      if (deviceOwner.isDeleted) return res.status(403).json({ message: 'Tài khoản đã bị xóa' });
+      if (deviceOwner.pendingDeletionAt) return res.status(403).json({ message: 'Tài khoản đang chờ xóa', code: 'PENDING_DELETION' });
       req.user = deviceOwner;
       req.deviceId = deviceOwner.devices.find(d => d.tokenHash === tokenHash && !d.isRevoked).deviceId;
       return next();
@@ -33,6 +35,8 @@ const protect = async (req, res, next) => {
     req.user = await User.findById(decoded.id).select('-password');
     if (!req.user) return res.status(401).json({ message: 'User không tồn tại' });
     if (req.user.isBanned) return res.status(403).json({ message: 'Tài khoản đã bị khóa bởi quản trị viên' });
+    if (req.user.isDeleted) return res.status(403).json({ message: 'Tài khoản đã bị xóa' });
+    if (req.user.pendingDeletionAt) return res.status(403).json({ message: 'Tài khoản đang chờ xóa', code: 'PENDING_DELETION' });
 
     // So sánh ở độ chính xác giây (giống JWT `iat`) để tránh lệch do phần mili-giây bị cắt.
     if (decoded.iat && req.user.passwordChangedAt) {

@@ -1,4 +1,5 @@
 const authService = require('../services/auth.service');
+const accountDeletionService = require('../services/accountDeletion.service');
 const AppError = require('../utils/AppError');
 const handleError = require('../utils/handleError');
 const { setAuthCookie, clearAuthCookie } = require('../utils/auth/authCookie');
@@ -284,6 +285,33 @@ exports.verifyResetOtp = async (req, res) => {
     res.json(result);
   } catch (err) {
     handleWithCustomFallback(res, err, req.log, 'verify-reset-otp error', 'Lỗi xác thực OTP, vui lòng thử lại');
+  }
+};
+
+exports.requestAccountDeletion = async (req, res) => {
+  try {
+    const result = await accountDeletionService.requestAccountDeletion(req.user, req.body);
+    res.json(result);
+  } catch (err) {
+    handleWithCustomFallback(res, err, req.log, 'request-account-deletion error', 'Lỗi hệ thống, vui lòng thử lại sau');
+  }
+};
+
+exports.requestAccountRecovery = async (req, res) => {
+  try {
+    const result = await accountDeletionService.requestAccountRecovery(req.body.email);
+    res.json(result);
+  } catch (err) {
+    handleWithCustomFallback(res, err, req.log, 'request-account-recovery error', 'Lỗi hệ thống, vui lòng thử lại sau');
+  }
+};
+
+exports.verifyAccountRecovery = async (req, res) => {
+  try {
+    const result = await accountDeletionService.verifyAccountRecovery(req.body.email, req.body.otp);
+    res.json(result);
+  } catch (err) {
+    handleWithCustomFallback(res, err, req.log, 'verify-account-recovery error', 'Lỗi xác thực OTP, vui lòng thử lại');
   }
 };
 

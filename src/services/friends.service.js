@@ -41,8 +41,15 @@ async function searchUsers(currentUserId, q) {
   // Bảo mật: Tránh lỗi regex injection / ReDoS bằng cách escape các ký tự đặc biệt
   const escapedQuery = q.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
 
+  // Loại người đã chặn/bị chặn khỏi kết quả — trước đây chỉ báo lỗi lúc bấm "Kết bạn", không ẩn từ đầu.
+  const blockedDocs = await Block.find({ $or: [{ blocker: currentUserId }, { blocked: currentUserId }] })
+    .select('blocker blocked').lean();
+  const blockedIds = blockedDocs.map(b =>
+    b.blocker.toString() === currentUserId.toString() ? b.blocked.toString() : b.blocker.toString());
+
   const users = await User.find({
-    _id: { $ne: currentUserId },
+    _id: { $nin: [currentUserId, ...blockedIds] },
+    isDeleted: { $ne: true },
     nickname: { $regex: escapedQuery, $options: 'i' }
   }).select('nickname avatar isOnline').limit(20).lean();
 
@@ -69,6 +76,10 @@ async function searchUsers(currentUserId, q) {
 async function sendFriendRequest(senderId, receiverId, io) {
   if (receiverId === senderId.toString()) {
     throw new AppError('Không thể kết bạn với chính mình', 400);
+  }
+  const target = await User.findById(receiverId).select('isDeleted');
+  if (!target || target.isDeleted) {
+    throw new AppError('Không tìm thấy người dùng', 404);
   }
   if (await isBlocked(senderId, receiverId)) {
     throw new AppError('Không thể gửi lời mời kết bạn', 403);
@@ -394,15 +405,17 @@ async function blockUser(currentId, targetId, io) {
 
   await Block.updateOne({ blocker: currentId, blocked: targetId },
     { $setOnInsert: { blocker: currentId, blocked: targetId } }, { upsert: true });
-  const friendship = await Friendship.findOneAndDelete({
+  // Chỉ hủy lời mời đang chờ (chưa accept) — quan hệ bạn bè đã xác lập được giữ nguyên, vẫn không
+  // nhắn/gọi được nhờ isBlocked check độc lập ở message.handler/call.handler/friends.service.
+  const cancelledRequest = await Friendship.findOneAndDelete({
+    status: 'pending',
     $or: [
       { sender: currentId, receiver: targetId },
       { sender: targetId, receiver: currentId },
     ],
   });
-  if (friendship) {
-    const event = friendship.status === 'accepted' ? 'friend:unfriended' : 'friend:request_cancelled';
-    await notifyFriendshipParties(io, currentId, targetId, event, { friendshipId: friendship._id });
+  if (cancelledRequest) {
+    await notifyFriendshipParties(io, currentId, targetId, 'friend:request_cancelled', { friendshipId: cancelledRequest._id });
   }
 }
 
@@ -417,6 +430,11 @@ async function listBlocked(currentId, page) {
     users: blocks.slice(0, 50).filter(entry => entry.blocked).map(entry => entry.blocked),
     hasMore: blocks.length > 50,
   };
+}
+
+async function listBlockedIds(currentId) {
+  const blocks = await Block.find({ blocker: currentId }).select('blocked').lean();
+  return blocks.map(b => b.blocked.toString());
 }
 
 async function setAlias(currentId, targetId, alias) {
@@ -459,4 +477,5 @@ module.exports = {
   blockUser,
   unblockUser,
   listBlocked,
+  listBlockedIds,
 };

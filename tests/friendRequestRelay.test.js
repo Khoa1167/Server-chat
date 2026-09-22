@@ -4,6 +4,7 @@ process.env.ENCRYPTION_KEY ||= '0'.repeat(64);
 const Friendship = require('../src/models/Friendship');
 const Block = require('../src/models/Block');
 const Notification = require('../src/models/Notification');
+const User = require('../src/models/User');
 const { sendFriendRequest } = require('../src/services/friends.service');
 
 test('friend request reaches every receiver device from the saved friendship', async (t) => {
@@ -13,6 +14,7 @@ test('friend request reaches every receiver device from the saved friendship', a
     receiver: 'receiver',
     async populate() { return this; },
   };
+  t.mock.method(User, 'findById', () => ({ select: () => Promise.resolve({ isDeleted: false }) }));
   t.mock.method(Friendship, 'findOne', async () => null);
   t.mock.method(Block, 'exists', async () => null);
   t.mock.method(Friendship, 'create', async () => friendship);
