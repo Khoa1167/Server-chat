@@ -13,6 +13,9 @@ const logger = require('../../config/logger');
 const { claimAttachment, releaseAttachmentClaim, deleteAttachmentForMessage } = require('../../services/attachments.service');
 const { queueRoomEvent, pullMailbox, acknowledgeMailbox } = require('../../services/deviceMailbox.service');
 const { isBlocked } = require('../../services/blocks.service');
+const redis = require('../../config/redis');
+const { sendRoomMessagePush } = require('../../services/pushNotifications.service');
+const { verifyActionToken } = require('../../services/aiPermission.service');
 
 // Tin nhắn tự hủy chỉ nhận đúng 4 mốc cho phép — giá trị lạ coi như không đặt TTL, không lỗi.
 const DISAPPEARING_TTL_OPTIONS = [60, 3600, 86400, 604800]; // 1 phút / 1 giờ / 24 giờ / 7 ngày
@@ -24,6 +27,35 @@ const RECALL_WINDOW_MS = 24 * 60 * 60 * 1000;
 // Rate limit: tối đa 8 tin nhắn/5s per userId, cộng dồn mọi socket/tab.
 const NS_MESSAGE_SEND = 'message-send';
 const roomSendQueues = new Map();
+const dedupMemory = new Map();
+const DEDUP_SECONDS = 300;
+if (!redis) setInterval(() => {
+  for (const [key, entry] of dedupMemory) if (entry.expiresAt <= Date.now()) dedupMemory.delete(key);
+}, 60000).unref();
+
+async function claimClientMessage(userId, clientMsgId) {
+  const key = `msgdedup:${userId}:${clientMsgId}`;
+  if (redis) {
+    if (redis.status !== 'ready') throw new Error('Bộ nhớ chống trùng tạm thời không khả dụng');
+    if (await redis.set(key, 'processing', 'EX', DEDUP_SECONDS, 'NX') === 'OK') return { key, fresh: true };
+    return { key, fresh: false, value: await redis.get(key) };
+  }
+  const previous = dedupMemory.get(key);
+  if (previous && previous.expiresAt > Date.now()) return { key, fresh: false, value: previous.value };
+  dedupMemory.set(key, { value: 'processing', expiresAt: Date.now() + DEDUP_SECONDS * 1000 });
+  return { key, fresh: true };
+}
+
+async function completeClientMessage(key, message) {
+  if (redis) await redis.set(key, JSON.stringify(message), 'EX', DEDUP_SECONDS);
+  else dedupMemory.set(key, { value: JSON.stringify(message), expiresAt: Date.now() + DEDUP_SECONDS * 1000 });
+}
+
+async function releaseClientMessage(key) {
+  if (redis) {
+    if (await redis.get(key) === 'processing') await redis.del(key);
+  } else if (dedupMemory.get(key)?.value === 'processing') dedupMemory.delete(key);
+}
 
 // ponytail: tuần tự hóa gửi tin theo phòng trong một Socket.IO process để epoch không vượt mốc;
 // dùng lease phân tán nếu sau này chạy nhiều process server.
@@ -67,13 +99,20 @@ module.exports = function registerMessageHandlers(io, socket) {
     try { await acknowledgeMailbox(socket, id); } catch (err) { logger.error({ err, deviceId: socket.data.deviceId }, 'Lỗi mailbox acknowledgement'); }
   });
 
-  socket.on('message:send', async ({ roomId, content, iv, tag, encryptedKeys, type, replyTo, fileName, attachmentId, forwardedFrom, scheme, senderDeviceId, epoch, ttlSeconds }) => {
+  socket.on('message:send', async ({ roomId, content, iv, tag, encryptedKeys, type, replyTo, fileName, attachmentId, forwardedFrom, scheme, senderDeviceId, epoch, ttlSeconds, clientMsgId, aiActionToken }, callback) => {
+    let claim;
+    let saved = false;
     try {
+      if (clientMsgId !== undefined && (typeof clientMsgId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientMsgId))) {
+        if (callback) callback({ success: false, code: 'INVALID_ID', message: 'ID tin nhắn không hợp lệ' });
+        return;
+      }
       const uIdStr = userId.toString();
       const msgLimit = await checkRateWindow(NS_MESSAGE_SEND, uIdStr, { maxCount: 8, windowMs: 5000 });
 
       if (msgLimit.limited) {
         const retryAfter = Math.ceil(msgLimit.retryAfterMs / 1000);
+        if (callback) callback({ success: false, code: 'RATE_LIMITED', retryAfter });
         return socket.emit('error', {
           message: `Bạn đang gửi tin nhắn quá nhanh. Vui lòng thử lại sau ${retryAfter} giây.`,
           code: 'RATE_LIMITED',
@@ -84,7 +123,10 @@ module.exports = function registerMessageHandlers(io, socket) {
       const releaseRoomSendLock = await acquireRoomSendLock(roomId);
       try {
       const room = await Room.findOne({ _id: roomId, members: userId });
-      if (!room) return socket.emit('error', { message: 'Không có quyền' });
+      if (!room) {
+        if (callback) callback({ success: false, code: 'NO_PERMISSION' });
+        return socket.emit('error', { message: 'Không có quyền', clientMsgId });
+      }
       if (room.isDM) {
         const partnerId = room.members.find(id => id.toString() !== uIdStr);
         const allowed = partnerId && !await isBlocked(userId, partnerId) && await Friendship.exists({
@@ -94,11 +136,33 @@ module.exports = function registerMessageHandlers(io, socket) {
             { sender: partnerId, receiver: userId },
           ],
         });
-        if (!allowed) return socket.emit('error', { message: 'Không thể gửi tin nhắn trong đoạn chat này', code: 'DM_NOT_ALLOWED' });
+        if (!allowed) {
+          if (callback) callback({ success: false, code: 'DM_NOT_ALLOWED' });
+          return socket.emit('error', { message: 'Không thể gửi tin nhắn trong đoạn chat này', code: 'DM_NOT_ALLOWED', clientMsgId });
+        }
+      }
+      if (clientMsgId) {
+        claim = await claimClientMessage(uIdStr, clientMsgId);
+        if (!claim.fresh) {
+          if (claim.value && claim.value !== 'processing') {
+            const previous = JSON.parse(claim.value);
+            socket.emit('message:new', previous);
+            if (callback) callback({ success: true, message: previous });
+          } else if (callback) callback({ success: false, code: 'IN_PROGRESS' });
+          return;
+        }
+      }
+      // Tin do trợ lý gửi: token phải ràng buộc đúng phòng và clientMsgId; dedup clientMsgId ở trên làm token dùng một lần.
+      if (aiActionToken !== undefined && !(clientMsgId && await verifyActionToken(aiActionToken, {
+        userId, action: 'send_message', roomId: room._id, jti: clientMsgId,
+      }))) {
+        if (callback) callback({ success: false, code: 'AI_NOT_ALLOWED' });
+        return socket.emit('error', { message: 'Trợ lý chưa được phép gửi tin nhắn này', code: 'AI_NOT_ALLOWED', clientMsgId });
       }
       await assertCurrentSenderKey(room, userId, socket.data.deviceId, { scheme, senderDeviceId, epoch });
       if (type === 'poll' && !hasRoomPermission(room, userId, ROOM_PERMISSIONS.CREATE_POLLS)) {
-        return socket.emit('error', { message: 'Bạn không có quyền tạo khảo sát trong phòng này' });
+        if (callback) callback({ success: false, code: 'NO_PERMISSION' });
+        return socket.emit('error', { message: 'Bạn không có quyền tạo khảo sát trong phòng này', clientMsgId });
       }
 
 
@@ -110,10 +174,12 @@ module.exports = function registerMessageHandlers(io, socket) {
           const createdAt = isValidId ? new mongoose.Types.ObjectId(forwardedFrom).getTimestamp() : null;
           const isExpiredByRetention = createdAt && (Date.now() - createdAt.getTime() > Message.SERVER_RETENTION_MS);
           if (!isExpiredByRetention) {
-            return socket.emit('error', { message: 'Không thể chuyển tiếp tin nhắn đã bị thu hồi' });
+            if (callback) callback({ success: false, code: 'NO_PERMISSION' });
+            return socket.emit('error', { message: 'Không thể chuyển tiếp tin nhắn đã bị thu hồi', clientMsgId });
           }
         } else if (originalMsg.isDeleted) {
-          return socket.emit('error', { message: 'Không thể chuyển tiếp tin nhắn đã bị thu hồi' });
+          if (callback) callback({ success: false, code: 'NO_PERMISSION' });
+          return socket.emit('error', { message: 'Không thể chuyển tiếp tin nhắn đã bị thu hồi', clientMsgId });
         }
       }
 
@@ -122,7 +188,8 @@ module.exports = function registerMessageHandlers(io, socket) {
       const validTtl = DISAPPEARING_TTL_OPTIONS.includes(ttlSeconds) ? ttlSeconds : null;
       const isAttachment = ['image', 'audio', 'file'].includes(type);
       if (isAttachment !== Boolean(attachmentId)) {
-        return socket.emit('error', { message: 'Attachment không hợp lệ' });
+        if (callback) callback({ success: false, code: 'INVALID_ATTACHMENT' });
+        return socket.emit('error', { message: 'Attachment không hợp lệ', clientMsgId });
       }
 
       // Zero-Knowledge Relay: Lưu trực tiếp bản mã từ Client
@@ -149,6 +216,20 @@ module.exports = function registerMessageHandlers(io, socket) {
           forwardedFrom: forwardedFrom || null,
           expiresAt: validTtl ? new Date(Date.now() + validTtl * 1000) : null,
         });
+        saved = true;
+        const clientMsg = msg.toObject({ flattenMaps: true });
+        if (clientMsgId) {
+          clientMsg.clientMsgId = clientMsgId;
+          // Persist dedup immediately after MongoDB commits. Populate and Room updates may fail,
+          // but a retry must still resolve to this message instead of creating another one.
+          clientMsg.sender = {
+            _id: userId,
+            username: socket.user.username,
+            nickname: socket.user.nickname,
+            avatar: socket.user.avatar,
+          };
+          await completeClientMessage(claim.key, clientMsg);
+        }
 
         await msg.populate('sender', userFields.BASIC);
         if (replyTo) {
@@ -167,9 +248,16 @@ module.exports = function registerMessageHandlers(io, socket) {
         }
         await Room.findByIdAndUpdate(roomId, { lastMessage: msg._id });
 
-        const clientMsg = msg.toObject({ flattenMaps: true });
-        await queueRoomEvent(io, room.members, socket.data.deviceId, 'message:new', clientMsg);
+        if (clientMsgId) {
+          Object.assign(clientMsg, msg.toObject({ flattenMaps: true }), { clientMsgId });
+        }
+        const mailboxMsg = { ...clientMsg };
+        delete mailboxMsg.clientMsgId; // Mailbox nằm trong MongoDB; clientMsgId chỉ dùng cho ACK/broadcast trực tiếp.
+        await queueRoomEvent(io, room.members, socket.data.deviceId, 'message:new', mailboxMsg);
         io.to(roomId).emit('message:new', clientMsg);
+        if (callback) callback({ success: true, message: clientMsg });
+        // Push chỉ là tín hiệu chung để mở phòng; không được trì hoãn ACK hay chứa dữ liệu E2EE.
+        sendRoomMessagePush(room.members, userId, roomId).catch(err => logger.warn({ err, roomId }, 'Gửi push tin nhắn thất bại'));
         await rotateSenderKeyEpochAfterMessage(room, epoch, io);
       } catch (err) {
         await releaseAttachmentClaim(attachmentId, messageId).catch(() => {});
@@ -179,7 +267,10 @@ module.exports = function registerMessageHandlers(io, socket) {
         releaseRoomSendLock();
       }
     } catch (err) {
+      if (callback) callback({ success: false, code: err.message === 'Tin nhắn phải dùng Sender Key của epoch hiện tại' ? 'EPOCH_STALE' : 'SEND_FAILED', message: process.env.NODE_ENV === 'production' ? undefined : err.message });
       sendSocketError(socket, err);
+    } finally {
+      if (claim?.fresh && !saved) await releaseClientMessage(claim.key).catch(() => {});
     }
   });
 

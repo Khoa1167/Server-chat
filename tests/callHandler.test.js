@@ -1,3 +1,7 @@
+// Placeholder khóa cho test: socket handler require aiPermission.service → jwtKeys.js và auth.service → crypto.js.
+process.env.JWT_SECRET ||= 'test-only-placeholder-jwt-secret';
+process.env.ENCRYPTION_KEY ||= '0'.repeat(64);
+
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const registerCallHandlers = require('../src/socket/handlers/call.handler');

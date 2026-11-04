@@ -61,6 +61,16 @@ const userSchema = new mongoose.Schema({
     phone:          { type: String, enum: ['friends', 'private'], default: 'friends' },
     readReceipts:   { type: String, enum: ['friends', 'private'], default: 'friends' },
   },
+  aiSettings: {
+    enabled: { type: Boolean, default: false },
+    shareAiConversationHistory: { type: Boolean, default: false },
+    storeAiHistory: { type: Boolean, default: false },
+    syncAiHistory: { type: Boolean, default: false },
+    enableAiMemory: { type: Boolean, default: false },
+    voiceConsent: { type: Boolean, default: false },
+    policyId: { type: mongoose.Schema.Types.ObjectId, ref: 'AiConsentPolicy', default: null },
+    decidedAt: { type: Date, default: null },
+  },
   devices: [{
     deviceId:     { type: String, required: true },
     // Key identity dùng trong encrypted envelope. Device cũ tự tương thích vì service đặt bằng deviceId.

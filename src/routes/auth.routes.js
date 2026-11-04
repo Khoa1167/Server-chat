@@ -64,6 +64,8 @@ router.post('/verify-account-recovery', authController.verifyAccountRecovery);
 router.put('/devices', protect, authController.registerOrRenewDevice);
 router.delete('/devices/:deviceId', protect, authController.revokeDevice);
 router.get('/devices', protect, authController.listDevices);
+router.put('/push-subscription', protect, requireDeviceSession, authController.registerPushSubscription);
+router.delete('/push-subscription', protect, requireDeviceSession, authController.removePushSubscription);
 
 // ─── POST /api/auth/logout — Thu hồi token hiện tại ──────────────────────────
 router.post('/logout', protect, authController.logout);

@@ -1,3 +1,6 @@
+// Placeholder JWT_SECRET cho test: socket handler require aiPermission.service → jwtKeys.js.
+process.env.JWT_SECRET ||= 'test-only-placeholder-jwt-secret';
+
 const assert = require('node:assert/strict');
 const test = require('node:test');
 process.env.ENCRYPTION_KEY ||= '0'.repeat(64);

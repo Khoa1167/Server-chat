@@ -10,6 +10,7 @@ const { checkRateWindow } = require('../utils/rateLimiter');
 const NS_DEVICE_LINK = 'device-link';
 const NS_DEVICE_LINK_CODE = 'device-link-code';
 const NS_DEVICE_LINK_PART = 'device-link-part';
+const NS_PUSH_SUBSCRIPTION = 'push-subscription';
 const allowDeviceLink = async (req, res) => {
   const { limited } = await checkRateWindow(NS_DEVICE_LINK, req.user._id.toString(), { maxCount: 20, windowMs: 10 * 60 * 1000 });
   if (!limited) return true;
@@ -359,6 +360,26 @@ exports.listDevices = async (req, res) => {
   try {
     const includeRevoked = req.query.includeRevoked === 'true';
     res.json(authService.listDevices(req.user, includeRevoked));
+  } catch (err) {
+    handleError(res, err);
+  }
+};
+
+exports.registerPushSubscription = async (req, res) => {
+  try {
+    const { limited } = await checkRateWindow(NS_PUSH_SUBSCRIPTION, `${req.user._id}:${req.deviceId}`, { maxCount: 30, windowMs: 60000 });
+    if (limited) return res.status(429).json({ message: 'Đăng ký thông báo quá nhanh, vui lòng thử lại sau' });
+    await authService.registerPushSubscription(req.user._id, req.deviceId, req.body?.token);
+    res.status(204).end();
+  } catch (err) {
+    handleError(res, err);
+  }
+};
+
+exports.removePushSubscription = async (req, res) => {
+  try {
+    await authService.removePushSubscription(req.user._id, req.deviceId);
+    res.status(204).end();
   } catch (err) {
     handleError(res, err);
   }

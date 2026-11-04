@@ -15,6 +15,9 @@ const Block = require('../src/models/Block');
 const Notification = require('../src/models/Notification');
 const LoginHistory = require('../src/models/LoginHistory');
 const PasskeyCredential = require('../src/models/PasskeyCredential');
+const PushSubscription = require('../src/models/PushSubscription');
+const AiConversation = require('../src/models/AiConversation');
+const AiMessage = require('../src/models/AiMessage');
 const cloudinary = require('../src/config/cloudinary');
 const roomsService = require('../src/services/rooms.service');
 const {
@@ -35,6 +38,7 @@ test('requestAccountDeletion đặt lịch xóa + thu hồi devices khi đúng m
     save: async function () { return this; },
   };
   t.mock.method(User, 'findById', async () => user);
+  t.mock.method(PushSubscription, 'deleteMany', async () => {});
 
   const result = await requestAccountDeletion({ _id: 'u1' }, { currentPassword: 'correct' });
 
@@ -100,10 +104,12 @@ test('verifyAccountRecovery hết hạn OTP thì xóa record và reject', async 
 });
 
 test('purgeExpiredAccountDeletions rời nhóm thường, bỏ qua DM, ghi tombstone đúng field', async (t) => {
+  const postPurge = t.mock.method(require('../src/services/posts.service'), 'purgeUser', async () => {});
   const normalRoom = { _id: 'room1', isDM: false };
   const dmRoom = { _id: 'room2', isDM: true };
   const user = {
     _id: 'u1', avatar: 'avatar-url', cover: 'cover-url', devices: [{ deviceId: 'd1' }],
+    aiSettings: { enabled: true, shareAiConversationHistory: true, storeAiHistory: true, syncAiHistory: true, enableAiMemory: true, voiceConsent: true, policyId: 'policy1', decidedAt: new Date() },
     save: async function () { return this; },
   };
 
@@ -115,11 +121,16 @@ test('purgeExpiredAccountDeletions rời nhóm thường, bỏ qua DM, ghi tombs
   t.mock.method(Notification, 'deleteMany', async () => {});
   t.mock.method(LoginHistory, 'deleteMany', async () => {});
   t.mock.method(PasskeyCredential, 'deleteMany', async () => {});
+  t.mock.method(AiConversation, 'deleteMany', async () => {});
+  t.mock.method(AiMessage, 'deleteMany', async () => {});
+  t.mock.method(PushSubscription, 'deleteMany', async () => {});
   const cloudinarySpy = t.mock.method(cloudinary, 'deleteCloudinaryImage', () => {});
 
   await purgeExpiredAccountDeletions(null);
 
   assert.equal(leaveRoomSpy.mock.calls.length, 1);
+  assert.equal(postPurge.mock.calls.length, 1);
+  assert.equal(postPurge.mock.calls[0].arguments[0], 'u1');
   assert.equal(leaveRoomSpy.mock.calls[0].arguments[0], 'room1');
   assert.equal(cloudinarySpy.mock.calls.length, 2); // avatar + cover
   assert.equal(user.nickname, 'Người dùng đã xóa');
@@ -127,4 +138,7 @@ test('purgeExpiredAccountDeletions rời nhóm thường, bỏ qua DM, ghi tombs
   assert.equal(user.isDeleted, true);
   assert.equal(user.pendingDeletionAt, null);
   assert.deepEqual(user.devices, []);
+  assert.deepEqual(user.aiSettings, {
+    enabled: false, shareAiConversationHistory: false, storeAiHistory: false, syncAiHistory: false, enableAiMemory: false, voiceConsent: false, policyId: null, decidedAt: null,
+  });
 });

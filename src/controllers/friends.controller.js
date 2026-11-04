@@ -154,6 +154,7 @@ exports.blockUser = async (req, res) => {
     const { limited } = await checkRateWindow(NS_BLOCK, req.user._id.toString(), { maxCount: 20, windowMs: 5 * 60 * 1000 });
     if (limited) return res.status(429).json({ message: 'Thao tác quá nhanh, thử lại sau' });
     await friendsService.blockUser(req.user._id, targetId, req.app.get('socketio'));
+    req.app.get('socketio')?.emit('posts:changed');
     res.json({ message: 'Đã chặn người dùng' });
   } catch (err) {
     handleError(res, err);
@@ -167,6 +168,7 @@ exports.unblockUser = async (req, res) => {
     const { limited } = await checkRateWindow(NS_BLOCK, req.user._id.toString(), { maxCount: 20, windowMs: 5 * 60 * 1000 });
     if (limited) return res.status(429).json({ message: 'Thao tác quá nhanh, thử lại sau' });
     await friendsService.unblockUser(req.user._id, targetId);
+    req.app.get('socketio')?.emit('posts:changed');
     res.json({ message: 'Đã bỏ chặn người dùng' });
   } catch (err) {
     handleError(res, err);

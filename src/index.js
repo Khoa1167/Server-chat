@@ -16,6 +16,7 @@ const sendServerError = require('./utils/sendServerError');
 const { cleanupExpiredTransfers } = require('./services/deviceLink.service');
 const { cleanupExpiredAttachments } = require('./services/attachments.service');
 const { purgeExpiredAccountDeletions } = require('./services/accountDeletion.service');
+const { syncCapabilityCatalog } = require('./services/aiPermission.service');
 
 const app = express();
 const server = http.createServer(app);
@@ -38,6 +39,7 @@ const io = new Server(server, {
 app.set('socketio', io);
 
 connectDB();
+syncCapabilityCatalog().catch(err => logger.error({ err }, 'Không thể đồng bộ danh mục quyền trợ lý'));
 initWorkers().catch(err => {
   logger.fatal({ err }, 'Không thể khởi tạo mediasoup Worker — gọi nhóm sẽ không hoạt động');
   process.exit(1);
@@ -49,6 +51,13 @@ app.use(cors({ origin: clientOrigins, credentials: true }));
 // '/health' để không rác log mỗi lần Docker healthcheck gọi (mỗi vài giây).
 app.use(pinoHttp({
   logger,
+  serializers: {
+    req(req) {
+      // Post searches can contain personal content; omit their query and headers from logs.
+      if (req.url?.startsWith('/api/posts')) return { id: req.id, method: req.method, url: req.url.split('?')[0] };
+      return req;
+    },
+  },
   autoLogging: { ignore: (req) => req.url === '/health' },
 }));
 app.use(express.json());
@@ -76,8 +85,10 @@ app.use('/api/rooms', require('./routes/rooms.routes'));
 app.use('/api/friends', require('./routes/friends.routes'));
 app.use('/api/reports', require('./routes/report.routes'));
 app.use('/api/security', require('./routes/security.routes'));
+app.use('/api/ai', require('./routes/ai.routes'));
 app.use('/api/admin', require('./routes/admin.routes'));
 app.use('/api/notifications', require('./routes/notifications.routes'));
+app.use('/api/posts', require('./routes/posts.routes'));
 
 app.get('/', (req, res) => {
   res.json({ message: '🚀 Chat server đang chạy!' });
@@ -109,6 +120,12 @@ const deviceLinkCleanupTimer = setInterval(() => {
   purgeExpiredAccountDeletions(io).catch(err => logger.error({ err }, 'Không thể purge tài khoản hết hạn xóa'));
 }, 60 * 1000);
 deviceLinkCleanupTimer.unref();
+
+// Post media stays until removed; failed deletions and abandoned uploads are retried.
+const cleanupPosts = () => require('./services/posts.service').cleanup().catch(() => logger.warn('Không thể dọn media bài viết'));
+cleanupPosts();
+const postCleanupTimer = setInterval(cleanupPosts, 60 * 1000);
+postCleanupTimer.unref();
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {

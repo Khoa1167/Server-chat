@@ -31,6 +31,7 @@ const { verifyTurnstile } = require('../utils/auth/turnstile');
 const deviceKeysCache = require('../utils/deviceKeysCache');
 const { signJwt, verifyJwt } = require('../utils/auth/jwtKeys');
 const { generateDeviceToken, hashDeviceToken } = require('../utils/auth/deviceToken');
+const pushSubscriptions = require('./pushSubscriptions.service');
 const AppError = require('../utils/AppError');
 const { rotateDmSenderKeyEpochsForUser } = require('./rooms.service');
 const {
@@ -463,6 +464,27 @@ async function verifyManagementAuth(currentUser, { currentPassword, currentCode,
   }
   await consumeManagedFactor(user, currentCode || code);
   return user;
+}
+
+// Xác nhận người thật bằng Passkey step-up hoặc mã TOTP 6 số (không nhận mã khôi phục), không đòi mật khẩu.
+async function verifyStepUpFactor(currentUser, { code, stepUpChallengeToken } = {}) {
+  const user = await User.findById(currentUser._id).select(TOTP_USER_FIELDS);
+  const hasPasskey = !!(await PasskeyCredential.exists({ user: currentUser._id }));
+  if (!user?.totpEnabled && !hasPasskey) {
+    throw new AppError('Cần bật xác thực hai bước hoặc thêm Passkey trước.', 403, { code: 'AI_PROOF_SETUP_REQUIRED' });
+  }
+  if (stepUpChallengeToken) {
+    const consumed = await MfaChallenge.updateOne(
+      activeChallenge(stepUpChallengeToken, 'step-up', { user: user._id, verifiedAt: { $ne: null } }),
+      { $set: { usedAt: new Date() } },
+    );
+    if (consumed.modifiedCount !== 1) throw new AppError('Xác thực Passkey đã hết hạn hoặc đã được sử dụng', 401);
+    return;
+  }
+  if (!user.totpEnabled || !/^\d{6}$/.test(String(code || ''))) {
+    throw new AppError('Cần xác nhận bằng Passkey hoặc mã TOTP 6 số', 401);
+  }
+  await consumeManagedFactor(user, code);
 }
 
 async function beginTotpSetup(currentUser, proof = {}) {
@@ -1430,6 +1452,7 @@ async function revokeDevice(currentUser, deviceId, currentPassword, io) {
   device.tokenHash = null;
 
   await currentUser.save();
+  await pushSubscriptions.removePushSubscription(currentUser._id, deviceId);
 
   await rotateDmSenderKeyEpochsForUser(currentUser._id, io);
   triggerDebouncedKeyChanged(io, currentUser._id);
@@ -1452,11 +1475,15 @@ async function logout(currentUser, deviceId) {
     if (device) {
       device.tokenHash = null;
       await currentUser.save();
+      await pushSubscriptions.removePushSubscription(currentUser._id, deviceId);
     }
   }
   // Bootstrap token (chưa đăng ký thiết bị, hạn sẵn 15 phút) — không có gì để thu hồi thêm
   return { message: 'Đã đăng xuất' };
 }
+
+const registerPushSubscription = (userId, deviceId, token) => pushSubscriptions.registerPushSubscription(userId, deviceId, token);
+const removePushSubscription = (userId, deviceId) => pushSubscriptions.removePushSubscription(userId, deviceId);
 
 module.exports = {
   generateOTP,
@@ -1467,6 +1494,7 @@ module.exports = {
   setNickname,
   login,
   verifyTotpLogin,
+  verifyStepUpFactor,
   beginTotpSetup,
   confirmTotpSetup,
   disableTotp,
@@ -1496,5 +1524,7 @@ module.exports = {
   registerOrRenewDevice,
   revokeDevice,
   listDevices,
+  registerPushSubscription,
+  removePushSubscription,
   logout,
 };

@@ -8,6 +8,8 @@ const Block = require('../models/Block');
 const Notification = require('../models/Notification');
 const LoginHistory = require('../models/LoginHistory');
 const PasskeyCredential = require('../models/PasskeyCredential');
+const AiConversation = require('../models/AiConversation');
+const AiMessage = require('../models/AiMessage');
 const AppError = require('../utils/AppError');
 const { decryptPII, hashBlindIndexAllKeys } = require('../utils/crypto');
 // require nguyên module (không destructure) — cùng lý do với roomsService ở dưới, giữ mock được trong test.
@@ -17,6 +19,7 @@ const { generateOTP, hashOTP } = require('./auth.service');
 // sẽ chụp cứng reference gốc lúc require, mock sau đó trên module.exports không có tác dụng.
 const roomsService = require('./rooms.service');
 const { sendAccountDeletionScheduledEmail, sendAccountRecoveryOTPEmail } = require('../config/mailer');
+const { removeUserPushSubscriptions } = require('./pushSubscriptions.service');
 
 const GRACE_PERIOD_MS = 14 * 24 * 60 * 60 * 1000;
 const RECOVERY_OTP_TTL_MS = 10 * 60 * 1000;
@@ -35,6 +38,7 @@ async function requestAccountDeletion(currentUser, { currentPassword }) {
   // Thu hồi toàn bộ device token — đăng xuất khắp nơi ngay, giống hành vi đổi mật khẩu.
   user.devices = [];
   await user.save();
+  await removeUserPushSubscriptions(user._id);
 
   const email = decryptPII(user.email);
   if (email) {
@@ -100,6 +104,7 @@ async function verifyAccountRecovery(email, otp) {
 }
 
 async function purgeOneAccount(user, io) {
+  await require('./posts.service').purgeUser(user._id, io);
   const rooms = await Room.find({ members: user._id });
   for (const room of rooms) {
     // DM giữ nguyên members — getDMPartner() (client) cần tìm thấy đối phương trong room.members
@@ -116,6 +121,9 @@ async function purgeOneAccount(user, io) {
     Notification.deleteMany({ user: user._id }),
     LoginHistory.deleteMany({ user: user._id }),
     PasskeyCredential.deleteMany({ user: user._id }),
+    AiConversation.deleteMany({ owner: user._id }),
+    AiMessage.deleteMany({ owner: user._id }),
+    removeUserPushSubscriptions(user._id),
   ]);
 
   if (user.avatar) cloudinary.deleteCloudinaryImage(user.avatar);
@@ -139,6 +147,16 @@ async function purgeOneAccount(user, io) {
   user.totpSecret = '';
   user.totpPendingSecret = '';
   user.totpRecoveryCodes = [];
+  user.aiSettings = {
+    enabled: false,
+    voiceConsent: false,
+    shareAiConversationHistory: false,
+    storeAiHistory: false,
+    syncAiHistory: false,
+    enableAiMemory: false,
+    policyId: null,
+    decidedAt: null,
+  };
   user.isDeleted = true;
   user.pendingDeletionAt = null;
   await user.save();
